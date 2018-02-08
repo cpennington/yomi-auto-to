@@ -7,6 +7,8 @@ import dataset
 import dateutil.parser
 import logging
 from forum import Forum
+from cursesmenu import CursesMenu
+from cursesmenu.items import FunctionItem
 
 
 db = dataset.connect('sqlite:///autoto.db')
@@ -55,27 +57,6 @@ def pick_tournament():
     choice = click.prompt("Which tournament?", type=int)
 
     return tournaments[choice]
-
-
-def pending_matchups(tournament):
-    matches = challonge.matches.index(tournament['id'])
-    participants = challonge.participants.index(tournament['id'])
-
-    participant_names = {
-        participant['id']: participant
-        for participant in participants
-    }
-
-    return [
-        (
-            tournament,
-            match,
-            participant_names[match['player1_id']],
-            participant_names[match['player2_id']],
-        )
-        for match in matches
-        if not match['completed_at'] and match['player1_id'] and match['player2_id']
-    ]
 
 
 def remove_marker(template):
@@ -170,7 +151,51 @@ def send_messages(username, password, pending_matchups, template):
                 resp.raise_for_status()
                 matches.insert({'match': match['id'], 'sent': True})
             except:
-                logging.exception("Unable to send matchup message")
+                logging.exception(f"Unable to send matchup message. Response: {resp.json()}")
+
+
+def all_tournaments():
+    tournaments = challonge.tournaments.index()
+    for tournament in tournaments:
+        yield tournament
+
+
+def matches_in_tournament(tournament):
+    matches = challonge.matches.index(tournament['id'])
+    participants = challonge.participants.index(tournament['id'])
+
+    participant_names = {
+        participant['id']: participant
+        for participant in participants
+    }
+
+    for match in matches:
+        yield (
+            tournament,
+            match,
+            participant_names[match['player1_id']] if match['player1_id'] else None,
+            participant_names[match['player2_id']] if match['player2_id'] else None,
+        )
+
+
+def match_is_pending(match):
+    return not match['completed_at'] and match['player1_id'] and match['player2_id']
+
+
+def send_pending_matches(menu, forum_username, forum_password):
+    menu.pause()
+
+    for tournament in all_tournaments():
+        template = get_template(tournament)
+        pending_matches = (
+            (tournament, match, player1, player2)
+            for (tournament, match, player1, player2)
+            in matches_in_tournament(tournament)
+            if match_is_pending(match)
+        )
+        send_messages(forum_username, forum_password, pending_matches, template)
+
+    menu.resume()
 
 
 @click.command()
@@ -179,11 +204,14 @@ def send_messages(username, password, pending_matchups, template):
 @click.option('--forum-username', prompt="Forum Username")
 @click.password_option('--forum-password', confirmation_prompt=False, prompt="Forum Password")
 def autoto(challonge_username, challonge_api_key, forum_username, forum_password):
+    print(repr((challonge_username, challonge_api_key, forum_username, forum_password)))
     challonge.set_credentials(challonge_username, challonge_api_key)
-    tournament = pick_tournament()
-    pending = pending_matchups(tournament)
-    template = get_template(tournament)
-    send_messages(forum_username, forum_password, pending, template)
+
+    menu = CursesMenu("Yomi Auto-TO", "Select an action")
+    menu.append_item(
+        FunctionItem("Send pending matches", send_pending_matches, [menu, forum_username, forum_password])
+    )
+    menu.show()
 
 
 if __name__ == '__main__':

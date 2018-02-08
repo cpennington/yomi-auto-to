@@ -9,6 +9,7 @@ banal==0.3.3              # via normality
 bleach==2.1.2             # via nbconvert
 certifi==2018.1.18        # via requests
 chardet==3.0.4            # via normality, requests
+curses-menu==0.5.0
 dataset==1.0.5
 decorator==4.2.1          # via ipython, traitlets
 entrypoints==0.2.3        # via nbconvert

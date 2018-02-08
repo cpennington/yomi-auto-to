@@ -1,11 +1,17 @@
 import requests
 import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 class Forum:
     def __init__(self, baseurl, username, password):
         self.baseurl = baseurl
         self.session = requests.session()
         self.session.headers['Accept'] = 'application/json'
+
+        retries = Retry(total=5, backoff_factor=10, status_forcelist=[429], method_whitelist=['POST'])
+        self.session.mount('http://', HTTPAdapter(max_retries=retries))
+
         csrf_resp = self.session.get(self.url('session/csrf'), data={'_': time.time()*1000})
         csrf_resp.raise_for_status()
 
