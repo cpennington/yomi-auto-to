@@ -20,6 +20,8 @@ class Forum:
         login_resp = self.session.post(self.url('session'), data=dict(login=username, password=password))
         login_resp.raise_for_status()
 
+        self.last_post = 0
+
     def url(self, endpoint):
         return f"{self.baseurl}/{endpoint}"
 
@@ -37,7 +39,12 @@ class Forum:
             'featured_link': '',
             'nested_post': 'true',
         }
-        return self.session.post(self.url('posts'), data=data)
+        seconds_since_last_post = time.time() - self.last_post
+        if seconds_since_last_post < 30:
+            time.sleep(30-seconds_since_last_post)
+
+        resp = self.session.post(self.url('posts'), data=data)
+        return resp
 
     def search_user(self, name):
         return self.session.get(
