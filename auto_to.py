@@ -94,8 +94,7 @@ def correct_user(forum, username):
     return corrected
 
 
-def send_messages(username, password, pending_matchups, template):
-    forum = Forum('https://forums.sirlingames.com', username, password)
+def send_messages(forum, pending_matchups, template):
     rounds = db['rounds']
     matches = db['matches']
 
@@ -182,9 +181,21 @@ def match_is_pending(match):
     return not match['completed_at'] and match['player1_id'] and match['player2_id']
 
 
-def send_pending_matches(menu, forum_username, forum_password):
-    menu.pause()
+@click.group()
+@click.option('--challonge-username', prompt="Challonge Username")
+@click.password_option('--challonge-api-key', confirmation_prompt=False, prompt="Challonge API Key")
+@click.option('--forum-username', prompt="Forum Username")
+@click.password_option('--forum-password', confirmation_prompt=False, prompt="Forum Password")
+@click.pass_context
+def autoto(ctx, challonge_username, challonge_api_key, forum_username, forum_password):
+    challonge.set_credentials(challonge_username, challonge_api_key)
+    ctx.obj['forum'] = Forum(
+        'https://forums.sirlingames.com', username, password)
 
+
+@autoto.command()
+@click.pass_context
+def send_pending_matches(ctx):
     for tournament in all_tournaments():
         template = get_template(tournament)
         pending_matches = (
@@ -193,25 +204,7 @@ def send_pending_matches(menu, forum_username, forum_password):
             in matches_in_tournament(tournament)
             if match_is_pending(match)
         )
-        send_messages(forum_username, forum_password, pending_matches, template)
-
-    menu.resume()
-
-
-@click.command()
-@click.option('--challonge-username', prompt="Challonge Username")
-@click.password_option('--challonge-api-key', confirmation_prompt=False, prompt="Challonge API Key")
-@click.option('--forum-username', prompt="Forum Username")
-@click.password_option('--forum-password', confirmation_prompt=False, prompt="Forum Password")
-def autoto(challonge_username, challonge_api_key, forum_username, forum_password):
-    print(repr((challonge_username, challonge_api_key, forum_username, forum_password)))
-    challonge.set_credentials(challonge_username, challonge_api_key)
-
-    menu = CursesMenu("Yomi Auto-TO", "Select an action")
-    menu.append_item(
-        FunctionItem("Send pending matches", send_pending_matches, [menu, forum_username, forum_password])
-    )
-    menu.show()
+        send_messages(ctx.obj['forum'], pending_matches, template)
 
 
 if __name__ == '__main__':

@@ -2,4 +2,3 @@ pychal
 requests
 ipython[notebook]
 dataset
-curses-menu
