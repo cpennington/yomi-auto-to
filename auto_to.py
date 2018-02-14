@@ -189,8 +189,13 @@ def match_is_pending(match):
 @click.pass_context
 def autoto(ctx, challonge_username, challonge_api_key, forum_username, forum_password):
     challonge.set_credentials(challonge_username, challonge_api_key)
-    ctx.obj['forum'] = Forum(
-        'https://forums.sirlingames.com', username, password)
+    ctx.obj = {
+        'forum': Forum(
+            'http://forums.sirlingames.com',
+            forum_username,
+            forum_password,
+        )
+    }
 
 
 @autoto.command()

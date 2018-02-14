@@ -20,6 +20,9 @@ class Forum:
         login_resp = self.session.post(self.url('session'), data=dict(login=username, password=password))
         login_resp.raise_for_status()
 
+        check_resp = self.session.get(self.url('session/current.json'))
+        check_resp.raise_for_status()
+
         self.last_post = 0
 
     def url(self, endpoint):
