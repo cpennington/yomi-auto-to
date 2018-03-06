@@ -4,51 +4,23 @@ import challonge as pychal
 import click
 import dataset
 import dateutil.parser
+from dateutil.tz import gettz
 import itertools
 import logging
 import sys
 import textwrap
 import json
+import re
+import shutil
 from enum import Enum
 from forum import Forum
 from random import Random
+from gcal import Calendar
+from autoto.challonge import Tournament
+from autoto.db import get_template, templates
 
 
 db = dataset.connect('sqlite:///autoto.db')
-
-
-MARKER = "## TEXT BELOW THIS IS IGNORED"
-
-VARIABLES = textwrap.dedent("""\
-    The following variables are available:
-        {name}: The name of the tournament
-        {round}: The current tournament round
-        {player1}: The name of player 1
-        {player2}: The name of player 2
-        {due}: The duedate of the match
-""")
-
-TITLE_TEMPLATE = textwrap.dedent(f"""\
-    {{name}} - R{{round}} - {{player1}}/{{player2}}
-    {MARKER}
-    {VARIABLES}
-""")
-
-BODY_TEMPLATE = textwrap.dedent(f"""\
-    Hello, @{{player1}} and @{{player2}},
-
-    You have until **{{due:%A, %B %d}}** @ 11:59pm GMT to complete your match.
-
-    If you are posting to the scheduling conversation first, provide a list of dates and times when you are available to play. If you are posting to the scheduling conversation second, pick a specific start time and date for your match from those provided by your opponent. If none work for you, propose specific alternatives.
-
-    Use WorldTimeBuddy.com to coordinate your match across different timezones. See [this post](http://forums.sirlingames.com/t/yomi-tournament-iyl-5/2639/84) for a guide.
-
-    Reporting: Either the victor or the vanquished (or both) should post results in [this thread](http://forums.sirlingames.com/t/tournament-lums-long-odds-announcement-signup/3543).
-
-    Best of luck!
-    {MARKER}
-    {VARIABLES}
-""")
 
 
 def pick_tournament():
@@ -60,25 +32,6 @@ def pick_tournament():
     choice = click.prompt("Which tournament?", type=int)
 
     return tournaments[choice]
-
-
-def remove_marker(template):
-    return template.split(MARKER)[0]
-
-
-def get_template(tournament_id):
-    table = db['templates']
-    template = table.find_one(tournament=tournament_id)
-
-    if not template:
-        template = {
-            'tournament': tournament_id,
-            'title': remove_marker(click.edit(text=TITLE_TEMPLATE, require_save=False)),
-            'body': remove_marker(click.edit(text=BODY_TEMPLATE, require_save=False)),
-        }
-        table.insert(template)
-
-    return template
 
 
 def correct_user(forum, username):
@@ -162,34 +115,49 @@ def send_messages(forum, pending_matchups, template):
                 })
             except:
                 logging.exception(f"Unable to send matchup message. Response: {resp.json()}")
+        else:
+            send_later = click.confirm("Send later?")
+            if not send_later:
+                matches.insert({
+                    'tournament': tournament_id,
+                    'round': round_id,
+                    'match': match_id,
+                    'player1': player1_name,
+                    'player2': player2_name,
+                    'sent': True,
+                })
 
 
-def all_tournaments():
-    tournaments = pychal.tournaments.index()
-    for tournament in tournaments:
-        yield tournament
+
+def all_tournaments(domains=None):
+    if domains is None:
+        domains = []
+    domains.append(None)
+
+    for domain in domains:
+        tournaments = pychal.tournaments.index(subdomain=domain)
+        for tournament in tournaments:
+            if not tournament['completed_at']:
+                yield Tournament(tournament)
 
 
 def matches_in_tournament(tournament):
-    matches = pychal.matches.index(tournament['id'])
-    participants = pychal.participants.index(tournament['id'])
-
     participant_names = {
-        participant['id']: participant
-        for participant in participants
+        participant.data['id']: participant
+        for participant in tournament.participants
     }
 
-    for match in matches:
+    for match in tournament.matches:
         yield (
             tournament,
             match,
-            participant_names[match['player1_id']] if match['player1_id'] else None,
-            participant_names[match['player2_id']] if match['player2_id'] else None,
+            participant_names[match.data['player1_id']] if match.data['player1_id'] else None,
+            participant_names[match.data['player2_id']] if match.data['player2_id'] else None,
         )
 
 
 def match_is_pending(match):
-    return not match['completed_at'] and match['player1_id'] and match['player2_id']
+    return not match.data['completed_at'] and match.data['player1_id'] and match.data['player2_id']
 
 
 @click.group()
@@ -204,6 +172,7 @@ def autoto(ctx, forum_username, forum_password):
             forum_password,
         )
     }
+    shutil.copyfile('autoto.db', 'autoto.db.bak')
 
 @autoto.group()
 @click.option('--challonge-username', prompt="Challonge Username", envvar='AUTOTO_CHALLONGE_USERNAME')
@@ -214,20 +183,19 @@ def challonge(challonge_username, challonge_api_key):
 @challonge.command('send-pending-matches')
 @click.pass_context
 def send_pending_matches(ctx):
-    for tournament in all_tournaments():
-        template = get_template(tournament['id'])
+    for tournament in all_tournaments(['iyl']):
+        template = tournament.template
         pending_matches = (
             (
-                tournament['id'],
-                tournament['name'],
-                match['id'],
-                match['round'],
-                player1['display_name'],
-                player2['display_name'],
+                tournament.data['id'],
+                tournament.data['name'],
+                match.data['id'],
+                match.data['round'],
+                match.player1.data['display_name'],
+                match.player2.data['display_name'],
             )
-            for (tournament, match, player1, player2)
-            in matches_in_tournament(tournament)
-            if match_is_pending(match)
+            for match
+            in tournament.pending_matches
         )
         send_messages(ctx.obj['forum'], pending_matches, template)
 
@@ -276,7 +244,8 @@ def record_win(winner, loser, week):
         return 1
 
     for player in (winner, loser):
-        if standings.find_one(username=player, week=week+1):
+        existing_standings = standings.find_one(username=player, week=week+1)
+        if existing_standings and existing_standings['tournament_round']:
             click.echo(f"{player} already has recorded standings for week {week}")
             return 1
 
@@ -285,34 +254,43 @@ def record_win(winner, loser, week):
         tx['matches'].update(match, ['id'])
 
         winner_prior = tx['ranked_standings'].find_one(username=winner, week=week)
+        loser_prior = tx['ranked_standings'].find_one(username=loser, week=week)
+
         winner_next = {
             'username': winner,
-            'stars': winner_prior['stars'] + winner_prior['tournament_round'] + 1,
+            'stars': winner_prior['stars'] + max(winner_prior['tournament_round'], loser_prior['tournament_round']) + 1,
             'games_played': winner_prior['games_played'] + 1,
             'week': week + 1,
             'tournament_round': (winner_prior['tournament_round'] + 1) % 3,
-            'active': True,
         }
-        tx['ranked_standings'].insert(winner_next)
+        tx['ranked_standings'].upsert(winner_next, ['username', 'week'])
 
-        loser_prior = tx['ranked_standings'].find_one(username=loser, week=week)
         loser_next = {
             'username': loser,
             'stars': max(loser_prior['stars'] - 1, 0),
             'games_played': loser_prior['games_played'] + 1,
             'week': week + 1,
             'tournament_round': 0,
-            'active': True,
         }
-        tx['ranked_standings'].insert(loser_next)
+        tx['ranked_standings'].upsert(loser_next, ['username', 'week'])
 
 
 @ranked.command('mark-inactive')
 @click.argument('player')
 @click.argument('week', type=int)
 def mark_inactive(player, week):
-    db['ranked_standings'].update(
+    db['ranked_standings'].upsert(
         {'username': player, 'week': week, 'active': False},
+        ['username', 'week']
+    )
+
+
+@ranked.command('mark-active')
+@click.argument('player')
+@click.argument('week', type=int)
+def mark_active(player, week):
+    db['ranked_standings'].upsert(
+        {'username': player, 'week': week, 'active': True},
         ['username', 'week']
     )
 
@@ -381,7 +359,7 @@ def send_ranked_matches(ctx, week):
     for p1, p2 in matches:
         print(f'{p1["username"]}/{p2["username"]}')
 
-    template = get_template('ranked')
+    template = get_template('ranked', 'Forums Quick Matches')
     send_messages(
         ctx.obj['forum'],
         ((
@@ -523,30 +501,59 @@ def bracket_history(match):
     if p1_standings['tournament_round'] == 0:
         p1_bracket = p1
     else:
-        p1_bracket = bracket_history(
-            matches.find_one(
-                winner=p1,
-                tournament=RANKED_TOURNAMENT_ID,
-                order_by=['-round']
-            )
+        old_matches = matches.find(
+            winner=p1,
+            tournament=RANKED_TOURNAMENT_ID,
+            order_by=['-round']
         )
+        previous_match = [
+            old_match for old_match in old_matches if old_match['round'] < match['round']
+        ][0]
+        p1_bracket = bracket_history(previous_match)
 
     if p2_standings['tournament_round'] == 0:
         p2_bracket = p2
     else:
-        p2_bracket = bracket_history(
-            matches.find_one(
-                winner=p2,
-                tournament=RANKED_TOURNAMENT_ID,
-                order_by=['-round']
-            )
+        old_matches = matches.find(
+            winner=p2,
+            tournament=RANKED_TOURNAMENT_ID,
+            order_by=['-round']
         )
+        previous_match = [
+            old_match for old_match in old_matches if old_match['round'] < match['round']
+        ][0]
+        p2_bracket = bracket_history(previous_match)
 
     return Bracket(
         p1_bracket,
         p2_bracket,
         match['winner'],
     )
+
+
+@ranked.command('finalize-week')
+@click.pass_context
+@click.argument('week', type=int)
+def finalize_week(ctx, week):
+    standings = db['ranked_standings']
+    matches = db['matches']
+
+    pending_matches = matches.find(week=week, winner=None)
+    for match in pending_matches:
+        print(match)
+        return
+
+    to_finalize = standings.find(week=week)
+    for current_standings in to_finalize:
+        print("Finalizing", current_standings)
+        future_standings = standings.find_one(week=week+1, username=current_standings['username']) or {}
+        for field, value in current_standings.items():
+            if future_standings.get(field) is None:
+                future_standings[field] = current_standings[field]
+        future_standings.pop('id', None)
+        future_standings['week'] = week + 1
+        print("Finalized to", future_standings)
+        standings.upsert(future_standings, keys=['id', 'username', 'week'])
 
 
 @ranked.command('post-summary')
@@ -582,12 +589,104 @@ def post_week_summary(ctx, week):
     print('\n'.join(post))
 
 
+def tz(hours):
+    return hours * 60 * 60
+
+
+TZINFOS = {
+    'EST': tz(-5),
+    'CST': tz(-6),
+    'MST': tz(-7),
+    'PST': tz(-8),
+    'CET': tz(1),
+}
+
+def scheduled_times(posts):
+    for post in posts:
+        match = re.search('<p>AutoTO: Schedule @ (.*)</p>', post['cooked'], flags=re.RegexFlag.IGNORECASE)
+
+        if match is None:
+            continue
+
+        scheduled_time = match.group(1)
+        yield (
+            post['updated_at'],
+            scheduled_time,
+            dateutil.parser.parse(scheduled_time, tzinfos=TZINFOS),
+        )
+
+
+def prompt_event(title, string, date, url):
+    while True:
+        action = click.prompt(
+            textwrap.dedent(f"""\
+                Scheduling "{title}" at {date} from "{string}"
+                Originally from {url}
+
+                y(es)/n(o)/e(dit)"""),
+            default='N',
+        )
+        if action[0].lower() == 'e':
+            title = click.edit(title, require_save=False).strip()
+            date = dateutil.parser.parse(click.edit(string, require_save=False),  tzinfos=TZINFOS)
+        elif action[0].lower() == 'y':
+            return title, date
+
 @autoto.command()
 @click.pass_context
 def calendar(ctx):
-    print(json.dumps(ctx.obj['forum'].messages().json(), indent=4))
+    scheduled_matches = db['scheduled_matches']
+
+    messages = ctx.obj['forum'].messages().json()['topic_list']['topics']
+    for message in messages:
+        posts = sorted(
+            scheduled_times(ctx.obj['forum'].message_posts(message['id'])),
+            reverse=True,
+        )
+        if posts:
+            updated_at, scheduled_string, scheduled_date = posts[0]
+            current_event = scheduled_matches.find_one(message_id=message['id'])
+            if current_event is None:
+                title, date = prompt_event(
+                    message['title'],
+                    scheduled_string,
+                    scheduled_date,
+                    ctx.obj['forum'].url(f"t/{message['id']}"),
+                )
+                scheduled_event = Calendar('5qcrghv93ken5kco8e0eeqo3do@group.calendar.google.com').insert_event(
+                    title, date
+                )
+                scheduled_matches.insert({
+                    'message_id': message['id'],
+                    'event_id': scheduled_event,
+                    'updated_at': updated_at,
+                })
+            elif current_event['updated_at'] < updated_at:
+                title, date = prompt_event(
+                    message['title'],
+                    scheduled_string,
+                    scheduled_date,
+                    ctx.obj['forum'].url(f"t/{message['id']}"),
+                )
+                scheduled_event = Calendar('5qcrghv93ken5kco8e0eeqo3do@group.calendar.google.com').update_event(
+                    current_event['event_id'],
+                    title,
+                    date,
+                )
+                scheduled_matches.update({
+                    'message_id': message['id'],
+                    'event_id': scheduled_event,
+                    'updated_at': updated_at,
+                }, keys=['message_id'])
 
 
+@autoto.command('edit-template')
+@click.argument('id')
+def edit_template(id):
+    existing = templates.find_one(tournament=id)
+    existing['title'] = click.edit(existing['title'], require_save=False)
+    existing['body'] = click.edit(existing['body'], require_save=False)
+    templates.update(existing, keys=['tournament'])
 
 if __name__ == '__main__':
     sys.exit(autoto())

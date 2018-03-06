@@ -48,6 +48,15 @@ class Forum:
         self.login()
         return self.session.get(self.url(f'topics/private-messages/{self.username}.json'))
 
+    def message(self, id):
+        self.login()
+        return self.session.get(self.url(f't/{id}.json'))
+
+    def message_posts(self, id):
+        self.login()
+        message = self.message(id)
+        yield from message.json()['post_stream']['posts']
+
     def send_private_message(self, recipients, title, body):
         self.login()
 

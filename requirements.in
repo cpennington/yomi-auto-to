@@ -1,4 +1,6 @@
+attrs
+dataset
+google-api-python-client
+lazy
 pychal
 requests
-ipython[notebook]
-dataset
