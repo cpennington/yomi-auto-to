@@ -44,9 +44,25 @@ class Forum:
     def url(self, endpoint):
         return f"{self.baseurl}/{endpoint}"
 
-    def messages(self):
+    def messages(self, archived=False):
         self.login()
-        return self.session.get(self.url(f'topics/private-messages/{self.username}.json'))
+        archived = '-archive' if archived else ''
+        return self.session.get(self.url(f'topics/private-messages{archived}/{self.username}.json'))
+
+    def iter_messages(self, include_archive=False):
+        archive_states = [False, True] if include_archive else [False]
+
+        for archive_state in archive_states:
+            current_page = self.messages(archive_state)
+
+            while True:
+                for topic in current_page.json()['topic_list']['topics']:
+                    yield topic, archive_state
+                more_topics = current_page.json()['topic_list'].get('more_topics_url')
+                if more_topics:
+                    current_page = self.session.get(self.url(more_topics))
+                else:
+                    break
 
     def message(self, id):
         self.login()
