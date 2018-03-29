@@ -9,6 +9,8 @@ attrs==17.4.0
 banal==0.3.3              # via normality
 certifi==2018.1.18        # via requests
 chardet==3.0.4            # via normality, requests
+click-log==0.2.1
+click==6.7                # via click-log
 dataset==1.0.5
 google-api-python-client==1.6.5
 httplib2==0.10.3          # via google-api-python-client, oauth2client

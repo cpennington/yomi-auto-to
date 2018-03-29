@@ -7,6 +7,7 @@ import re
 import shutil
 import sys
 import textwrap
+from datetime import datetime
 from enum import Enum
 from fnmatch import fnmatch
 from random import Random
@@ -15,12 +16,18 @@ import challonge as pychal
 import click
 import dataset
 import dateutil.parser
+import pytz
 from dateutil.tz import gettz
+from lazy import lazy
 
 from autoto.challonge import Tournament
 from autoto.db import get_template, templates, tournaments
 from forum import Forum
 from gcal import Calendar
+import click_log
+
+logger = logging.getLogger(__name__)
+click_log.basic_config(logger)
 
 db = dataset.connect('sqlite:///autoto.db')
 
@@ -117,7 +124,7 @@ def send_messages(forum, pending_matchups, template):
                     'sent': True,
                 })
             except:
-                logging.exception(f"Unable to send matchup message. Response: {resp.json()}")
+                logger.exception(f"Unable to send matchup message. Response: {resp.json()}")
         else:
             send_later = click.confirm("Send later?")
             if not send_later:
@@ -167,6 +174,7 @@ def match_is_pending(match):
 @click.option('--forum-username', prompt="Forum Username", envvar='AUTOTO_FORUM_USERNAME')
 @click.password_option('--forum-password', confirmation_prompt=False, prompt="Forum Password", envvar='AUTOTO_FORUM_PASSWORD')
 @click.pass_context
+@click_log.simple_verbosity_option(logger)
 def autoto(ctx, forum_username, forum_password):
     ctx.obj = {
         'forum': Forum(
@@ -185,7 +193,7 @@ def challonge(challonge_username, challonge_api_key):
 
 
 @challonge.command('send-pending-matches')
-@click.option('--domain', multiple=True)
+@click.option('--domain', 'domains', multiple=True)
 @click.pass_context
 def send_pending_matches(ctx, domains):
     for tournament in all_tournaments(domains):
@@ -226,6 +234,7 @@ def send_round_matches(ctx, tournament_matcher, round, domains):
                 )
                 for match
                 in tournament.matches_for_round(round)
+                if match.data['state'] != 'complete'
             )
             send_messages(ctx.obj['forum'], pending_matches, template)
 
@@ -335,6 +344,8 @@ def mark_active(player, week):
         ['username', 'week']
     )
 
+STARS_PER_LEVEL = 5
+
 class League(Enum):
     Bronze = 0
     SuperBronze = 1
@@ -344,7 +355,7 @@ class League(Enum):
 
     @classmethod
     def from_stars(cls, stars):
-        return cls(stars // 5)
+        return cls(stars // STARS_PER_LEVEL)
 
     def display_name(self):
         return {
@@ -382,7 +393,7 @@ def greedy_matches(participants):
 
 
 def ranked_match_id(round, player1, player2):
-    return f"ranked-{round}-{player1['username']}-{player2['username']}"
+    return f"ranked-{round}-{player1}-{player2}"
 
 
 RANKED_TOURNAMENT_ID = 'ranked'
@@ -406,11 +417,34 @@ def send_ranked_matches(ctx, week):
         ((
             RANKED_TOURNAMENT_ID,
             'Ranked',
-            ranked_match_id(week, player1, player2),
+            ranked_match_id(week, player1['username'], player2['username']),
             week,
             player1['username'],
             player2['username'],
+            [],
         ) for (player1, player2) in matches),
+        template,
+    )
+
+
+@ranked.command('create-match')
+@click.pass_context
+@click.argument('player1')
+@click.argument('player2')
+@click.argument('week', type=int)
+def create_ranked_match(ctx, player1, player2, week):
+    template = get_template('ranked', 'Forums Quick Matches')
+    send_messages(
+        ctx.obj['forum'],
+        [(
+            RANKED_TOURNAMENT_ID,
+            'Ranked',
+            ranked_match_id(week, player1, player2),
+            week,
+            player1,
+            player2,
+            [],
+        )],
         template,
     )
 
@@ -438,6 +472,15 @@ class Box:
         return Box(sum((box.data for box in boxes), []))
 
     def left_of(self, other):
+        if self.height != other.height:
+            raise ValueError(textwrap.dedent("""\
+                Can't place boxes with mismatched heights next to each other:
+                Height: {self.height}
+                {self}
+                Height: {other.height}
+                {other}
+            """).format(self=self, other=other))
+
         pad_to = max(len(row) for row in self.data)
         return Box([
             f"{{:{pad_to}}}{{}}".format(left, right)
@@ -448,10 +491,40 @@ class Box:
     def __str__(self):
         return "\n".join(row.rstrip() for row in self.data)
 
+class SingletonBracket:
+    def __init__(self, name):
+        self.name = name
+
+    @property
+    def exit_row(self):
+        return 0
+
+    @property
+    def height(self):
+        return 1
+
+    @property
+    def names(self):
+        return [self.name]
+
+    def render(self, name_width):
+        return self.name
+
+    def __str__(self):
+        return self.name + ' -'
+
 class Bracket:
     def __init__(self, top, bottom, winner=None):
-        self.top = top
-        self.bottom = bottom
+        if isinstance(top, Bracket):
+            self.top = top
+        else:
+            self.top = SingletonBracket(top)
+
+        if isinstance(bottom, Bracket):
+            self.bottom = bottom
+        else:
+            self.bottom = SingletonBracket(bottom)
+
         self.winner = winner
 
         self.upper_corner = '\N{BOX DRAWINGS LIGHT DOWN AND LEFT}'
@@ -478,45 +551,54 @@ class Bracket:
 
     @property
     def names(self):
-        return getattr(self.top, 'names', [self.top]) + getattr(self.bottom, 'names', [self.bottom])
+        return self.top.names + self.bottom.names
+
+    @property
+    def exit_row(self):
+        return self.top.height
+
+    @property
+    def height(self):
+        return self.top.height + self.bottom.height + 1
+
+    def top_box(self, name_width):
+        return Box(self.top.render(name_width))
+
+    def bottom_box(self, name_width):
+        return Box(self.bottom.render(name_width))
 
     def render(self, name_width):
-        if isinstance(self.top, Bracket):
-            top_box = Box(self.top.render(name_width))
-        else:
-            top_box = Box(self.top)
-
-        if isinstance(self.bottom, Bracket):
-            bottom_box = Box(self.bottom.render(name_width))
-        else:
-            bottom_box = Box(self.bottom)
+        top_box = self.top_box(name_width)
+        bottom_box = self.bottom_box(name_width)
 
         max_width = max(top_box.width, bottom_box.width, name_width)
         top_padding = Box(
-            [''] * (top_box.height // 2) +
+            [''] * (self.top.exit_row) +
             [' ' + self.upper_h * (max_width - top_box.width)] +
-            [''] * (top_box.height // 2)
+            [''] * (top_box.height - 1 - self.top.exit_row)
         )
+
         bottom_padding = Box(
-            [''] * (bottom_box.height // 2) +
+            [''] * (self.bottom.exit_row) +
             [' ' + self.lower_h * (max_width - bottom_box.width)] +
-            [''] * (bottom_box.height // 2)
+            [''] * (bottom_box.height - 1 - self.bottom.exit_row)
         )
+
         border = Box.empty(max_width, 1)
 
-        top_bar_length = top_box.height // 2
-        bottom_bar_length = bottom_box.height // 2
+        top_bar_length = top_box.height - 1 - self.top.exit_row
+        bottom_bar_length = self.bottom.exit_row
 
         winner = self.winner or ''
 
         bar = Box(
-            [""] * top_bar_length +
+            [""] * (top_box.height - 1 - top_bar_length) +
             [f'{self.upper_h}{self.upper_corner}'] +
             [f' {self.upper_v}'] * top_bar_length +
             [f' {self.join}{self.center_h} {winner}'] +
             [f' {self.lower_v}'] * bottom_bar_length +
             [f'{self.lower_h}{self.lower_corner}'] +
-            [""] * bottom_bar_length
+            [""] * (bottom_box.height - 1 - bottom_bar_length)
         )
 
         return str(Box.vertical(
@@ -585,10 +667,11 @@ def finalize_week(week):
 
     to_finalize = standings.find(week=week)
     for current_standings in to_finalize:
-        print("Finalizing", current_standings)
+        print(f"Week {week}", current_standings)
         future_standings = standings.find_one(
-            week=week+1, username=current_standings['username'], tournament=RANKED_TOURNAMENT_ID
+            week=week+1, username=current_standings['username']
         ) or {}
+        print(f"Week {week+1}", future_standings)
         for field in current_standings:
             if future_standings.get(field) is None:
                 future_standings[field] = current_standings[field]
@@ -640,18 +723,20 @@ def sub_player(player, sub, week):
 def post_week_summary(ctx, week):
     standings = db['ranked_standings']
 
-    ps = list(standings.find(week=week, order_by=['-active', '-stars', 'username']))
+    ps = list(standings.find(week=week, order_by=['-stars', '-active', 'username']))
 
     post = []
 
     post.append(f'# Week {week} standings')
     for league, players in itertools.groupby(ps, lambda p: League.from_stars(p['stars'])):
-        post.append(f'## {league.name} League')
+        post.append(f'## {league.name} League ({league.value*STARS_PER_LEVEL}+ :star:)')
+        post.append("| Player | Points | Active |")
+        post.append("|---|:---:|---:|")
         for player in players:
-            post.append('* {username}{inactive}: {stars}'.format(
+            post.append('| {username} | {stars} | {inactive} |'.format(
                 username=player['username'],
-                stars=":star:" * (player['stars'] % 10),
-                inactive=" (inactive)" if not player['active'] else '',
+                stars=":star:" * (player['stars'] % STARS_PER_LEVEL),
+                inactive=":knockdown:" if not player['active'] else ':psfist:',
             ))
     post.append('')
     post.append(f'# Week {week} matches')
@@ -672,16 +757,20 @@ def tz(hours):
 
 
 TZINFOS = {
-    'EST': tz(-5),
-    'CST': tz(-6),
-    'MST': tz(-7),
-    'PST': tz(-8),
-    'CET': tz(1),
+    'EST': gettz('US/Eastern'),
+    'EDT': gettz('US/Eastern'),
+    'CST': gettz('US/Central'),
+    'CDT': gettz('US/Central'),
+    'MST': gettz('US/Mountain'),
+    'MDT': gettz('US/Mountain'),
+    'PST': gettz('US/Pacific'),
+    'PDT': gettz('US/Pacific'),
+    'CET': gettz('CET'),
 }
 
 def scheduled_times(posts):
     for post in posts:
-        match = re.search('<p>AutoTO: Schedule @ (.*)</p>', post['cooked'], flags=re.RegexFlag.IGNORECASE)
+        match = re.search('(?:<p>|<br>)\s*AutoTO: Schedule @ ([^<]*)(?:</p>)?', post['cooked'], flags=re.RegexFlag.IGNORECASE)
 
         if match is None:
             continue
@@ -709,58 +798,90 @@ def prompt_event(title, string, date, url):
             date = dateutil.parser.parse(click.edit(string, require_save=False),  tzinfos=TZINFOS)
         elif action[0].lower() == 'y':
             return title, date
+        elif action[0].lower() == 'n':
+            return None, None
 
-@autoto.command()
-@click.pass_context
-def calendar(ctx):
-    scheduled_matches = db['scheduled_matches']
+LAST_PRIVATE_MESSAGE = 'last_private_message'
 
-    most_recently_scheduled = dateutil.parser.parse(scheduled_matches.find_one(order_by=['-updated_at'])['updated_at'])
-    print(most_recently_scheduled)
 
-    for message, archived in ctx.obj['forum'].iter_messages(include_archive=True):
-        if dateutil.parser.parse(message['bumped_at']) < most_recently_scheduled and archived:
-            break
+def scheduled_at(context_message, times):
+        scheduled_matches = db['scheduled_matches']
 
-        posts = sorted(
-            scheduled_times(ctx.obj['forum'].message_posts(message['id'])),
+        times = sorted(
+            times,
             reverse=True,
         )
-        if posts:
-            updated_at, scheduled_string, scheduled_date = posts[0]
-            current_event = scheduled_matches.find_one(message_id=message['id'])
+        if times:
+            updated_at, scheduled_string, scheduled_date = times[0]
+            current_event = scheduled_matches.find_one(
+                message_id=context_message['id'])
             if current_event is None:
                 title, date = prompt_event(
-                    message['title'],
+                    context_message['title'],
                     scheduled_string,
                     scheduled_date,
-                    ctx.obj['forum'].url(f"t/{message['id']}"),
+                    ctx.obj['forum'].url(f"t/{context_message['id']}"),
                 )
+                if title == None:
+                    return
                 scheduled_event = Calendar('5qcrghv93ken5kco8e0eeqo3do@group.calendar.google.com').insert_event(
                     title, date
                 )
                 scheduled_matches.insert({
-                    'message_id': message['id'],
+                    'message_id': context_message['id'],
                     'event_id': scheduled_event,
                     'updated_at': updated_at,
                 })
             elif current_event['updated_at'] < updated_at:
                 title, date = prompt_event(
-                    message['title'],
+                    context_message['title'],
                     scheduled_string,
                     scheduled_date,
-                    ctx.obj['forum'].url(f"t/{message['id']}"),
+                    ctx.obj['forum'].url(f"t/{context_message['id']}"),
                 )
+                if title == None:
+                    return
                 scheduled_event = Calendar('5qcrghv93ken5kco8e0eeqo3do@group.calendar.google.com').update_event(
                     current_event['event_id'],
                     title,
                     date,
                 )
                 scheduled_matches.update({
-                    'message_id': message['id'],
+                    'message_id': context_message['id'],
                     'event_id': scheduled_event,
                     'updated_at': updated_at,
                 }, keys=['message_id'])
+
+
+@autoto.command()
+@click.pass_context
+def calendar(ctx):
+    dates = db['dates']
+
+    most_recently_scheduled = (
+        dates.find_one(key=LAST_PRIVATE_MESSAGE) or {}
+    ).get(
+        'date',
+        datetime(2000, 1, 1, tzinfo=gettz('UTC'))
+    ).astimezone(gettz('UTC'))
+
+    logger.debug("Most Recently Scheduled: %s", most_recently_scheduled)
+
+    last_analyzed = most_recently_scheduled
+    for message, archived in ctx.obj['forum'].iter_messages(include_archive=True):
+        message_date = dateutil.parser.parse(message['bumped_at'])
+        if message_date < most_recently_scheduled:
+            if archived:
+                logger.debug("Found an archived message %s, older than %s, finished", message['id'], most_recently_scheduled)
+                break
+            else:
+                logger.debug("Found a message %s, older than %s, skipping it", message['id'], most_recently_scheduled)
+                continue
+
+        last_analyzed = max(last_analyzed, message_date)
+
+        scheduled_at(message, scheduled_times(ctx.obj['forum'].message_posts(message['id'])))
+    dates.upsert({'key': LAST_PRIVATE_MESSAGE, 'date': last_analyzed}, keys=['key'])
 
 
 @autoto.command('edit-template')
@@ -786,9 +907,7 @@ def daily(ctx, challonge_username, challonge_api_key):
 @click.argument('slug')
 @click.argument('to')
 def add_to(slug, to):
-    print(slug, to)
     tournament = tournaments.find_one(slug=slug) or {}
-    print(tournament)
     tournament.setdefault('slug', slug)
     if tournament.get('tos'):
         tournament['tos'] = ','.join(set(tournament['tos'].split(',')) | {to})
@@ -796,7 +915,6 @@ def add_to(slug, to):
         tournament['tos'] = to
     del tournament['id']
 
-    print(tournament)
     tournaments.upsert(tournament, keys=['slug'])
 
 if __name__ == '__main__':

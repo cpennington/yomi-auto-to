@@ -5,7 +5,7 @@ from urllib3.util.retry import Retry
 
 
 class Forum:
-    SECONDS_BETWEEN_POSTS = 20
+    SECONDS_BETWEEN_POSTS = 16
 
     def __init__(self, baseurl, username, password):
         self.baseurl = baseurl
