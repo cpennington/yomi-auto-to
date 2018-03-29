@@ -801,56 +801,74 @@ def prompt_event(title, string, date, url):
         elif action[0].lower() == 'n':
             return None, None
 
+
 LAST_PRIVATE_MESSAGE = 'last_private_message'
 
+AUTOTO_COMMANDS = []
 
-def scheduled_at(context_message, times):
-        scheduled_matches = db['scheduled_matches']
+def autoto_command(command, private=None, public=None):
+    def wrapper(fn):
+        AUTOTO_COMMANDS.append({
+            'command': command,
+            'private': private,
+            'public': public,
+            'callback': fn,
+        })
+        return fn
+    return wrapper
 
-        times = sorted(
-            times,
-            reverse=True,
-        )
-        if times:
-            updated_at, scheduled_string, scheduled_date = times[0]
-            current_event = scheduled_matches.find_one(
-                message_id=context_message['id'])
-            if current_event is None:
-                title, date = prompt_event(
-                    context_message['title'],
-                    scheduled_string,
-                    scheduled_date,
-                    ctx.obj['forum'].url(f"t/{context_message['id']}"),
-                )
-                if title == None:
-                    return
-                scheduled_event = Calendar('5qcrghv93ken5kco8e0eeqo3do@group.calendar.google.com').insert_event(
-                    title, date
-                )
-                scheduled_matches.insert({
-                    'message_id': context_message['id'],
-                    'event_id': scheduled_event,
-                    'updated_at': updated_at,
-                })
-            elif current_event['updated_at'] < updated_at:
-                title, date = prompt_event(
-                    context_message['title'],
-                    scheduled_string,
-                    scheduled_date,
-                    ctx.obj['forum'].url(f"t/{context_message['id']}"),
-                )
-                if title == None:
-                    return
-                scheduled_event = Calendar('5qcrghv93ken5kco8e0eeqo3do@group.calendar.google.com').update_event(
-                    current_event['event_id'],
-                    title,
-                    date,
-                )
-                scheduled_matches.update({
-                    'message_id': context_message['id'],
-                    'event_id': scheduled_event,
-                    'updated_at': updated_at,
-                }, keys=['message_id'])
+
+@autoto_command(r"Schedule @ (?P<time>[^<]*)", private='.*')
+def scheduled_at(forum, context_message, matches):
+    scheduled_matches = db['scheduled_matches']
+
+    matches = sorted(
+        matches,
+        key=lambda m: m['post']['updated_at'],
+        reverse=True,
+    )
+    if matches:
+        updated_at = matches[0]['post']['updated_at']
+        scheduled_string = matches[0]['time']
+        scheduled_date = dateutil.parser.parse(scheduled_string, tzinfos=TZINFOS),
+        current_event = scheduled_matches.find_one(
+            message_id=context_message['id'])
+        if current_event is None:
+            title, date = prompt_event(
+                context_message['title'],
+                scheduled_string,
+                scheduled_date,
+                forum.url(f"t/{context_message['id']}"),
+            )
+            if title == None:
+                return
+            scheduled_event = Calendar('5qcrghv93ken5kco8e0eeqo3do@group.calendar.google.com').insert_event(
+                title, date
+            )
+            scheduled_matches.insert({
+                'message_id': context_message['id'],
+                'event_id': scheduled_event,
+                'updated_at': updated_at,
+            })
+        elif current_event['updated_at'] < updated_at:
+            title, date = prompt_event(
+                context_message['title'],
+                scheduled_string,
+                scheduled_date,
+                forum.url(f"t/{context_message['id']}"),
+            )
+            if title == None:
+                return
+            scheduled_event = Calendar('5qcrghv93ken5kco8e0eeqo3do@group.calendar.google.com').update_event(
+                current_event['event_id'],
+                title,
+                date,
+            )
+            scheduled_matches.update({
+                'message_id': context_message['id'],
+                'event_id': scheduled_event,
+                'updated_at': updated_at,
+            }, keys=['message_id'])
 
 
 @autoto.command()
@@ -863,13 +881,14 @@ def calendar(ctx):
     ).get(
         'date',
         datetime(2000, 1, 1, tzinfo=gettz('UTC'))
-    ).astimezone(gettz('UTC'))
+    ).astimezone()
 
     logger.debug("Most Recently Scheduled: %s", most_recently_scheduled)
 
     last_analyzed = most_recently_scheduled
     for message, archived in ctx.obj['forum'].iter_messages(include_archive=True):
         message_date = dateutil.parser.parse(message['bumped_at'])
+        logger.debug("Processing message %s from %s", message['id'], message_date)
         if message_date < most_recently_scheduled:
             if archived:
                 logger.debug("Found an archived message %s, older than %s, finished", message['id'], most_recently_scheduled)
@@ -878,9 +897,25 @@ def calendar(ctx):
                 logger.debug("Found a message %s, older than %s, skipping it", message['id'], most_recently_scheduled)
                 continue
 
+        logger.debug("Updating last_analyzed from %s to %s", last_analyzed, max(last_analyzed, message_date))
         last_analyzed = max(last_analyzed, message_date)
 
-        scheduled_at(message, scheduled_times(ctx.obj['forum'].message_posts(message['id'])))
+        posts = ctx.obj['forum'].message_posts(message['id'])
+        for command in AUTOTO_COMMANDS:
+            matching_posts = [
+                {'post': post, **match.groupdict()}
+                for (match, post) in (
+                    (
+                        re.search(fr'(?:<p>|<br>)\s*AutoTO: {command["command"]}(?:</p>)?', post['cooked'], flags=re.RegexFlag.IGNORECASE),
+                        post
+                    )
+                    for post in posts
+                )
+                if match is not None
+            ]
+            command['callback'](ctx.obj['forum'], message, matching_posts)
+
+    logger.debug("Last analyzed was %s", last_analyzed)
     dates.upsert({'key': LAST_PRIVATE_MESSAGE, 'date': last_analyzed}, keys=['key'])
 
 
