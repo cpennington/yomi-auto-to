@@ -84,8 +84,12 @@ def send_messages(forum, pending_matchups, template):
             }
             rounds.insert(round)
 
-        player1_name = correct_user(forum, player1)
-        player2_name = correct_user(forum, player2)
+        try:
+            player1_name = correct_user(forum, player1)
+            player2_name = correct_user(forum, player2)
+        except Exception:
+            logging.exception("Unable to locate user, skipping")
+            continue
 
         round_id = str(abs(match_round))
         if match_round < 0:
@@ -1055,11 +1059,12 @@ def edit_template(slug):
 @click.option('--challonge-username', prompt="Challonge Username", envvar='AUTOTO_CHALLONGE_USERNAME')
 @click.password_option('--challonge-api-key', confirmation_prompt=False, prompt="Challonge API Key", envvar='AUTOTO_CHALLONGE_API_KEY')
 @click.option('--since', type=lambda v: dateparser.parse(v).astimezone(), default=None)
+@click.option('--domain', 'domains', multiple=True)
 @click.pass_context
-def daily(ctx, challonge_username, challonge_api_key, since):
+def daily(ctx, challonge_username, challonge_api_key, since, domains):
     ctx.invoke(challonge, challonge_username=challonge_username,
                challonge_api_key=challonge_api_key)
-    ctx.invoke(send_pending_matches)
+    ctx.invoke(send_pending_matches, domains=domains)
     ctx.invoke(process_autoto, since=since)
 
 

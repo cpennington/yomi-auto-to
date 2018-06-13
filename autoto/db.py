@@ -64,7 +64,7 @@ def get_template(id, name):
     if not template:
         template = {
             'tournament': id,
-            'slug': click.prompt('Template slug'),
+            'slug': click.prompt('Template slug (for {})'.format(name)),
             'title': remove_marker(click.edit(text=default_title(name), require_save=False)),
             'body': remove_marker(click.edit(text=default_body(name), require_save=False)),
         }
