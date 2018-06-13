@@ -2,6 +2,24 @@ import requests
 import time
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import wrapt
+
+
+@wrapt.decorator
+def paged(wrapped, instance, args, kwargs):
+    current_page = wrapped(*args, **kwargs)
+
+    while True:
+        for topic in current_page.json()['topic_list']['topics']:
+            if topic['pinned']:
+                continue
+            yield topic
+        more_topics = current_page.json()['topic_list'].get(
+            'more_topics_url')
+        if more_topics:
+            current_page = instance.session.get(instance.url(more_topics))
+        else:
+            break
 
 
 class Forum:
@@ -44,25 +62,17 @@ class Forum:
     def url(self, endpoint):
         return f"{self.baseurl}/{endpoint}"
 
-    def messages(self, archived=False):
+    @paged
+    def private_messages(self, archived=False):
         self.login()
         archived = '-archive' if archived else ''
         return self.session.get(self.url(f'topics/private-messages{archived}/{self.username}.json'))
 
-    def iter_messages(self, include_archive=False):
-        archive_states = [False, True] if include_archive else [False]
-
-        for archive_state in archive_states:
-            current_page = self.messages(archive_state)
-
-            while True:
-                for topic in current_page.json()['topic_list']['topics']:
-                    yield topic, archive_state
-                more_topics = current_page.json()['topic_list'].get('more_topics_url')
-                if more_topics:
-                    current_page = self.session.get(self.url(more_topics))
-                else:
-                    break
+    @paged
+    def public_threads(self, category=None, order='activity'):
+        self.login()
+        category = f'c/{category}/l/' if category is not None else ''
+        return self.session.get(self.url(f'{category}latest.json?order={order}'))
 
     def message(self, id):
         self.login()

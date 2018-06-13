@@ -56,7 +56,7 @@ def default_body(tournament_name):
     ])
 
 def remove_marker(template):
-    return template.split(self.MARKER)[0]
+    return template.split(MARKER)[0]
 
 def get_template(id, name):
     template = templates.find_one(tournament=id)
@@ -64,7 +64,7 @@ def get_template(id, name):
     if not template:
         template = {
             'tournament': id,
-            'slug': click.prompt('Template slug:'),
+            'slug': click.prompt('Template slug'),
             'title': remove_marker(click.edit(text=default_title(name), require_save=False)),
             'body': remove_marker(click.edit(text=default_body(name), require_save=False)),
         }
