@@ -7,6 +7,8 @@ import re
 import shutil
 import sys
 import textwrap
+import os.path
+
 from datetime import datetime
 from enum import Enum
 from fnmatch import fnmatch
@@ -190,7 +192,8 @@ def autoto(ctx, forum_username, forum_password):
             forum_password,
         )
     }
-    shutil.copyfile('autoto.db', 'autoto.db.bak')
+    if os.path.exists('autoto.db'):
+        shutil.copyfile('autoto.db', 'autoto.db.bak')
 
 
 @autoto.group()
