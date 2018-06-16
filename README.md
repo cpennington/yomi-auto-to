@@ -13,6 +13,9 @@ Installation
   * Why? This will copy AutoTO onto your computer prior to use
 * [Get a Challonge API Key](https://challonge.com/settings/developer)
   * Why? AutoTO will use this to look up the current state of tournaments you are running
+* Set up Google Calendar Access
+  * Why? This will allow AutoTO to post scheduled matches to the Yomi Tournament Calendar
+  * How? Follow Step 1 of https://developers.google.com/calendar/quickstart/python
 * Install AutoTO
   * On a commandline in the `yomi-auto-to` directory, run `pip install -r requirements.txt`
     * Why? This will install the python packages used by AutoTO
