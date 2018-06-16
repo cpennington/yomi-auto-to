@@ -18,6 +18,7 @@ Installation
     * Why? This will install the python packages used by AutoTO
     * How?
       * On Windows: [Python on Windows FAQ](https://docs.python.org/3/faq/windows.html)
+          * In GitHub Desktop: Repository > Open in Command Prompt
       * On Mac OS X: [Using Python on a Macintosh](https://docs.python.org/3.6/using/mac.html)
 
 Usage
