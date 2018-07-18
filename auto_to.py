@@ -8,8 +8,9 @@ import shutil
 import sys
 import textwrap
 import os.path
+import time
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from fnmatch import fnmatch
 from random import Random
@@ -77,8 +78,15 @@ def send_messages(forum, pending_matchups, template):
         )
 
         if round is None:
+            prev_round = rounds.find_one(
+                tournament=tournament_id,
+                round=match_round - 1,
+            )
             due_date = click.prompt(
-                f"When is round {match_round} due?", type=dateparser.parse)
+                f"When is round {match_round} due?",
+                type=dateparser.parse,
+                default=prev_round['due_date'] + timedelta(days=7)
+            )
             round = {
                 'tournament': tournament_id,
                 'round': match_round,
@@ -118,21 +126,24 @@ def send_messages(forum, pending_matchups, template):
             f"To: {', '.join(recipients)}\n======\n{title}\n======\n{body}\n{send}?")
 
         if should_send:
-            try:
-                resp = forum.send_private_message(recipients, title, body)
-                resp.raise_for_status()
-                matches.insert({
-                    'tournament': tournament_id,
-                    'round': round_id,
-                    'match': match_id,
-                    'player1': player1_name,
-                    'player2': player2_name,
-                    'thread_id': resp.json()['post']['id'],
-                    'sent': True,
-                })
-            except:
-                logger.exception(
-                    f"Unable to send matchup message. Response: {resp.json()}")
+            while True:
+                try:
+                    resp = forum.send_private_message(recipients, title, body)
+                    resp.raise_for_status()
+                    matches.insert({
+                        'tournament': tournament_id,
+                        'round': round_id,
+                        'match': match_id,
+                        'player1': player1_name,
+                        'player2': player2_name,
+                        'thread_id': resp.json()['post']['id'],
+                        'sent': True,
+                    })
+                    break
+                except:
+                    logger.exception(
+                        f"Unable to send matchup message. Response: {resp.json()}")
+                    time.sleep(30)
         else:
             send_later = click.confirm("Send later?")
             if not send_later:
@@ -450,9 +461,18 @@ def ranked_match_id(round, player1, player2):
 @click.pass_context
 def send_ranked_matches(ctx, ranked_id, week):
     standings = db['ranked_standings']
+    matches = db['matches']
 
     ps = list(standings.find(week=week, active=True,
                              tournament=ranked_id, order_by=['-stars', 'username']))
+
+    already_scheduled_matches = matches.find(round=week, tournament=ranked_id)
+    already_scheduled_players = sum(
+        [[match['player1'], match['player2']] for match in already_scheduled_matches],
+        []
+    )
+    print(ps, already_scheduled_players)
+    ps = [player for player in ps if player['username'] not in already_scheduled_players]
 
     matches = list(greedy_matches(week, ps))
 
@@ -734,17 +754,27 @@ def bracket_history(match, ranked_id):
 
 
 @ranked.command('finalize-week')
+@click.pass_context
 @click.argument('ranked_id')
 @click.argument('week', type=int)
-def finalize_week(ranked_id, week):
+def finalize_week(ctx, ranked_id, week):
     standings = db['ranked_standings']
     matches = db['matches']
 
     pending_matches = matches.find(
-        week=week, winner=None, tournament=ranked_id)
+        round=week, winner=None, tournament=ranked_id)
     for match in pending_matches:
-        print(match)
-        return
+        while True:
+            winner = click.prompt("{}/{} winner [1/2/N]".format(match['player1'], match['player2']), default='N', show_default=False)
+            if winner == '1':
+                ctx.invoke(record_win, ranked_id=ranked_id, week=week, winner=match['player1'], loser=match['player2'])
+            elif winner == '2':
+                ctx.invoke(record_win, ranked_id=ranked_id, week=week, winner=match['player2'], loser=match['player1'])
+            elif winner.lower() == 'n':
+                pass
+            else:
+                continue
+            break
 
     to_finalize = standings.find(week=week, tournament=ranked_id)
     for current_standings in to_finalize:
@@ -761,6 +791,9 @@ def finalize_week(ranked_id, week):
         print("Finalized to", future_standings)
         standings.upsert(future_standings, keys=[
                          'id', 'username', 'week', 'tournament'])
+
+    ctx.invoke(send_ranked_matches, ranked_id=ranked_id, week=week+1)
+    ctx.invoke(post_week_summary, ranked_id=ranked_id, week=week+1)
 
 
 @ranked.command('sub')
@@ -812,19 +845,28 @@ def post_week_summary(ctx, ranked_id, week):
 
     post = []
 
+    def append_player_rankings(ps):
+        for league, players in itertools.groupby(ps, lambda p: League.from_stars(p['stars'])):
+            post.append(
+                f'## {league.name} League ({league.value*STARS_PER_LEVEL}+ :star:)')
+            post.append("| Player | Points")
+            post.append("|---|:---:|")
+            for player in players:
+                post.append('| {username} | {stars} |'.format(
+                    username=player['username'],
+                    stars=":star:" * (player['stars'] % STARS_PER_LEVEL),
+                    inactive=":knockdown:" if not player['active'] else ':psfist:',
+                ))
+
     post.append(f'# Week {week} standings')
-    for league, players in itertools.groupby(ps, lambda p: League.from_stars(p['stars'])):
-        post.append(
-            f'## {league.name} League ({league.value*STARS_PER_LEVEL}+ :star:)')
-        post.append("| Player | Points | Active |")
-        post.append("|---|:---:|---:|")
-        for player in players:
-            post.append('| {username} | {stars} | {inactive} |'.format(
-                username=player['username'],
-                stars=":star:" * (player['stars'] % STARS_PER_LEVEL),
-                inactive=":knockdown:" if not player['active'] else ':psfist:',
-            ))
-    post.append('')
+    post.append('# :psfist: Active Roster')
+    append_player_rankings([p for p in ps if p['active']])
+    post.append('---')
+    post.append('# :knockdown: Inactive Roster')
+    post.append('[details="Full List"]')
+    append_player_rankings([p for p in ps if not p['active']])
+    post.append('[/details]')
+    post.append('---')
     post.append(f'# Week {week} matches')
 
     matches = db['matches'].find(tournament=ranked_id, round=week)
