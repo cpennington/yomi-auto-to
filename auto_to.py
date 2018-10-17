@@ -337,12 +337,14 @@ def record_win(ranked_id, winner, loser, week):
         loser_prior = tx['ranked_standings'].find_one(
             username=loser, week=week, tournament=ranked_id)
 
+        max_round = max(winner_prior['tournament_round'] or 0, loser_prior['tournament_round'] or 0)
+
         winner_next = {
             'username': winner,
-            'stars': winner_prior['stars'] + max(winner_prior['tournament_round'], loser_prior['tournament_round']) + 1,
+            'stars': winner_prior['stars'] + max_round + 1,
             'games_played': winner_prior['games_played'] + 1,
             'week': week + 1,
-            'tournament_round': (max(winner_prior['tournament_round'], loser_prior['tournament_round']) + 1) % 3,
+            'tournament_round': max_round % 3,
             'tournament': ranked_id
         }
         tx['ranked_standings'].upsert(
@@ -350,8 +352,8 @@ def record_win(ranked_id, winner, loser, week):
 
         loser_next = {
             'username': loser,
-            'stars': max(loser_prior['stars'] - 1, 0),
-            'games_played': loser_prior['games_played'] + 1,
+            'stars': max((loser_prior['stars'] or 0) - 1, 0),
+            'games_played': (loser_prior['games_played'] or 0) + 1,
             'week': week + 1,
             'tournament_round': 0,
             'tournament': ranked_id,
@@ -404,10 +406,10 @@ class League(Enum):
 
 
 def match_cost(round, player1, player2):
-    win_cost = abs(player1['tournament_round'] -
-                   player2['tournament_round']) * 50
-    league1 = League.from_stars(player1['stars'])
-    league2 = League.from_stars(player2['stars'])
+    win_cost = abs((player1['tournament_round'] or 1) -
+                   (player2['tournament_round'] or 1)) * 50
+    league1 = League.from_stars(player1['stars'] or 0)
+    league2 = League.from_stars(player2['stars'] or 0)
     league_cost = max(abs(league1.value - league2.value) - 1, 0) * 10
 
     matches = db['matches']
@@ -440,7 +442,6 @@ def greedy_matches(round, participants):
 
     while len(participants) > 1:
         player1 = scheduling_priority[0]
-        print (player1['username'], {p['username']: match_cost(round, player1, p) for p in participants if p != player1})
         player2 = min([p for p in participants if p != player1],
                       key=lambda x: match_cost(round, player1, x))
 
@@ -711,12 +712,16 @@ def bracket_history(match, ranked_id):
             key=lambda r: int(r['round']),
             reverse=True
         )
-        previous_match = [
+        previous_matches = [
             old_match for old_match in old_matches if int(old_match['round']) < int(match['round'])
-        ][0]
+        ]
+        if previous_matches:
+            previous_match = previous_matches[0]
 
-        if previous_match['winner'] == p1:
-            p1_bracket = bracket_history(previous_match, ranked_id)
+            if previous_match['winner'] == p1:
+                p1_bracket = bracket_history(previous_match, ranked_id)
+            else:
+                p1_bracket = p1
         else:
             p1_bracket = p1
 
@@ -737,12 +742,17 @@ def bracket_history(match, ranked_id):
             key=lambda r: int(r['round']),
             reverse=True
         )
-        previous_match = [
+        previous_matches = [
             old_match for old_match in old_matches if int(old_match['round']) < int(match['round'])
-        ][0]
+        ]
 
-        if previous_match['winner'] == p2:
-            p2_bracket = bracket_history(previous_match, ranked_id)
+        if previous_matches:
+            previous_match = previous_matches[0]
+
+            if previous_match['winner'] == p2:
+                p2_bracket = bracket_history(previous_match, ranked_id)
+            else:
+                p2_bracket = p2
         else:
             p2_bracket = p2
 
@@ -846,7 +856,7 @@ def post_week_summary(ctx, ranked_id, week):
     post = []
 
     def append_player_rankings(ps):
-        for league, players in itertools.groupby(ps, lambda p: League.from_stars(p['stars'])):
+        for league, players in itertools.groupby(ps, lambda p: League.from_stars(p['stars'] or 0)):
             post.append(
                 f'## {league.name} League ({league.value*STARS_PER_LEVEL}+ :star:)')
             post.append("| Player | Points")
@@ -854,7 +864,7 @@ def post_week_summary(ctx, ranked_id, week):
             for player in players:
                 post.append('| {username} | {stars} |'.format(
                     username=player['username'],
-                    stars=":star:" * (player['stars'] % STARS_PER_LEVEL),
+                    stars=":star:" * ((player['stars'] or 0) % STARS_PER_LEVEL),
                     inactive=":knockdown:" if not player['active'] else ':psfist:',
                 ))
 
@@ -910,7 +920,7 @@ def prompt_event(title, string, date, url):
         if action[0].lower() == 'e':
             title = click.edit(title, require_save=False).strip()
             date = dateparser.parse(click.edit(
-                string, require_save=False),  tzinfos=TZINFOS)
+                string, require_save=False))
         elif action[0].lower() == 'y':
             return title, date
         elif action[0].lower() == 'n':
