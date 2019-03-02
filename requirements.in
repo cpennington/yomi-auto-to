@@ -8,3 +8,4 @@ click_log
 dateparser
 wrapt
 oauth2client
+black
