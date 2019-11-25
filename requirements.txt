@@ -35,8 +35,9 @@ requests==2.22.0
 rsa==4.0                  # via google-auth, oauth2client
 six==1.12.0               # via dataset, google-api-python-client, google-auth, oauth2client, prompt-toolkit, python-dateutil
 sqlalchemy==1.3.6         # via alembic, dataset
+tabulate==0.8.6
 tzlocal==2.0.0            # via dateparser, pychal
 uritemplate==3.0.0        # via google-api-python-client
-urllib3==1.25.3           # via requests
+urllib3==1.25.7           # via requests
 wcwidth==0.1.7            # via prompt-toolkit
 wrapt==1.11.2
