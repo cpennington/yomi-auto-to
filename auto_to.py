@@ -3,46 +3,37 @@
 import itertools
 import json
 import logging
+import os.path
 import re
 import shutil
 import sys
 import textwrap
-import os.path
 import time
-
-from datetime import datetime, timedelta, date
+from datetime import date, datetime, timedelta
 from enum import Enum
 from fnmatch import fnmatch
 from random import Random
 
 import challonge as pychal
 import click
+import click_log
 import dataset
-import pytz
-from lazy import lazy
 import dateparser
+import pytz
+from tabulate import tabulate
+from lazy import lazy
+from mako.template import Template
+from prompt_toolkit import prompt
 
 from autoto.challonge import Tournament
 from autoto.db import get_template, templates, tournaments
 from forum import Forum
 from gcal import Calendar
-import click_log
 
 logger = logging.getLogger(__name__)
 click_log.basic_config(logger)
 
 db = dataset.connect("sqlite:///autoto.db")
-
-
-def pick_tournament():
-    tournaments = pychal.tournaments.index()
-
-    for id, tournament in enumerate(tournaments):
-        click.echo(f"{id}: {tournament['name']}")
-
-    choice = click.prompt("Which tournament?", type=int)
-
-    return tournaments[choice]
 
 
 def correct_user(forum, username):
@@ -51,7 +42,11 @@ def correct_user(forum, username):
     search_result = search_result.json()["users"]
 
     if len(search_result) > 1:
-        raise Exception(f"{username} is ambiguous")
+        search_result = [
+            result for result in search_result if result["username"] == username
+        ]
+    if len(search_result) > 1:
+        raise Exception(f"{username} is ambiguous ({search_result})")
     if len(search_result) == 0:
         raise Exception(f"{username} not found")
     corrected = search_result[0]["username"]
@@ -121,24 +116,28 @@ def send_messages(forum, pending_matchups, template):
             round_id += "L"
 
         title = (
-            template["title"]
-            .format(
+            Template(template["title"])
+            .render(
+                id=tournament_id,
                 name=tournament_name,
                 round=round_id,
                 player1=player1_name,
                 player2=player2_name,
                 due=round["due_date"],
+                get_tournament_metadata=get_tournament_metadata,
             )
             .strip()
         )
         body = (
-            template["body"]
-            .format(
+            Template(template["body"])
+            .render(
+                id=tournament_id,
                 name=tournament_name,
                 round=round_id,
                 player1=player1_name,
                 player2=player2_name,
                 due=round["due_date"],
+                get_tournament_metadata=get_tournament_metadata,
             )
             .strip()
         )
@@ -161,7 +160,7 @@ def send_messages(forum, pending_matchups, template):
                             "match": match_id,
                             "player1": player1_name,
                             "player2": player2_name,
-                            "thread_id": resp.json()["post"]["id"],
+                            "thread_id": resp.json()["post"]["topic_id"],
                             "sent": True,
                         }
                     )
@@ -184,6 +183,23 @@ def send_messages(forum, pending_matchups, template):
                         "sent": True,
                     }
                 )
+
+
+def get_tournament_metadata(name, **keys):
+    metadata = db["metadata"]
+    row = metadata.find_one(name=name, **keys)
+    if not row:
+        value = prompt(
+            "{keys} {name}=".format(
+                keys=" ".join("{}={!r}".format(*item) for item in keys.items()),
+                name=name,
+            )
+        )
+        row = {"name": name, "value": value}
+        row.update(keys)
+        metadata.insert(row)
+
+    return row["value"]
 
 
 def all_tournaments(domains=None):
@@ -258,6 +274,107 @@ def autoto(ctx, forum_username, forum_password):
 )
 def challonge(challonge_username, challonge_api_key):
     pychal.set_credentials(challonge_username, challonge_api_key)
+
+
+@challonge.command("prompt-expiring-matches")
+@click.option("--domain", "domains", multiple=True)
+@click.pass_context
+def prompt_expiring_matches(ctx, domains):
+    tournaments = {
+        tournament.data["id"]: tournament for tournament in all_tournaments(domains)
+    }
+    pending_matches = {
+        (match.player1.data["display_name"], match.player2.data["display_name"], match.data["round"])
+        for tournament in tournaments.values()
+        for match in tournament.pending_matches
+    }
+    results = db.query(
+        """
+            SELECT *
+            FROM matches
+            JOIN rounds
+            ON matches.tournament = rounds.tournament
+            AND matches.round = CASE WHEN rounds.round > 0 THEN rounds.round ELSE (-rounds.round || 'L') END
+            WHERE winner IS NULL
+            AND rounds.due_date BETWEEN :today AND :later
+            AND rounds.tournament IN ({tournaments})
+        """.format(
+            tournaments=",".join(repr(id) for id in tournaments.keys())
+        ),
+        today=date.today(),
+        later=date.today() + timedelta(days=3),
+    )
+
+    print(
+        tabulate(
+            (
+                {
+                    "Tournament": tournaments[result["tournament"]].data["name"],
+                    "Player 1": result["player1"],
+                    "Player 2": result["player2"],
+                    "Round": result["round"],
+                    "Due Date": result["due_date"],
+                    "Thread": "http://forums.sirlingames.com/t/{}".format(
+                        result["thread_id"]
+                    ),
+                }
+                for result in results
+                if (result['player1'], result['player2'], result['round']) in pending_matches
+            ),
+            {},
+        )
+    )
+
+
+@challonge.command("display-expired-matches")
+@click.option("--domain", "domains", multiple=True)
+@click.pass_context
+def display_expired_matches(ctx, domains):
+    tournaments = {
+        tournament.data["id"]: tournament for tournament in all_tournaments(domains)
+    }
+    pending_matches = {
+        (match.player1.data["display_name"], match.player2.data["display_name"], match.data["round"])
+        for tournament in tournaments.values()
+        for match in tournament.pending_matches
+    }
+    results = db.query(
+        """
+            SELECT *
+            FROM matches
+            JOIN rounds
+            ON matches.tournament = rounds.tournament
+            AND matches.round = CASE WHEN rounds.round > 0 THEN rounds.round ELSE (-rounds.round || 'L') END
+            WHERE winner IS NULL
+            AND player1 IS NOT NULL
+            AND player2 IS NOT NULL
+            AND due_date < :today
+            AND rounds.tournament IN ({tournaments})
+        """.format(
+            tournaments=",".join(repr(id) for id in tournaments.keys())
+        ),
+        today=date.today(),
+    )
+    results = list(results)
+    print(
+        tabulate(
+            (
+                {
+                    "Tournament": tournaments[result["tournament"]].data["name"],
+                    "Player 1": result["player1"],
+                    "Player 2": result["player2"],
+                    "Round": result["round"],
+                    "Due Date": result["due_date"],
+                    "Thread": "http://forums.sirlingames.com/t/{}".format(
+                        result["thread_id"]
+                    ),
+                }
+                for result in results
+                if (result['player1'], result['player2'], result['round']) in pending_matches
+            ),
+            {},
+        )
+    )
 
 
 @challonge.command("send-pending-matches")
@@ -1266,8 +1383,12 @@ def daily(ctx, challonge_username, challonge_api_key, since, domains):
     ctx.invoke(send_pending_matches, domains=domains)
     logger.info("Parsing forum messages")
     ctx.invoke(process_autoto, since=since)
-    logger.info("Finalize ranked matches")
-    ctx.invoke(finalize_most_recent, ranked_id="ranked")
+    logger.info("Soon to expire matches")
+    ctx.invoke(prompt_expiring_matches, domains=domains)
+    logger.info("Expired matches")
+    ctx.invoke(display_expired_matches, domains=domains)
+    # logger.info("Finalize ranked matches")
+    # ctx.invoke(finalize_most_recent, ranked_id="ranked")
 
 
 @autoto.command()

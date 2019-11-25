@@ -1,11 +1,12 @@
 attrs
+click_log
 dataset
+dateparser
 google-api-python-client
 lazy
+oauth2client
+prompt_toolkit
 pychal
 requests
-click_log
-dateparser
+tabulate
 wrapt
-oauth2client
-black
