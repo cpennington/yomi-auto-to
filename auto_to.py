@@ -8,7 +8,7 @@ import re
 import shutil
 import sys
 import textwrap
-import time
+from collections import defaultdict
 from datetime import date, datetime, timedelta
 from enum import Enum
 from fnmatch import fnmatch
@@ -29,6 +29,7 @@ from autoto.challonge import Tournament
 from autoto.db import get_template, templates, tournaments
 from forum import Forum
 from gcal import Calendar
+from notify import setup_notifications, notify
 
 logger = logging.getLogger(__name__)
 click_log.basic_config(logger)
@@ -51,7 +52,8 @@ def correct_user(forum, username):
         raise Exception(f"{username} not found")
     corrected = search_result[0]["username"]
     if corrected != username:
-        click.confirm(f"Did you mean {corrected} rather than {username}?")
+        notify(f"Replaced {username} with {corrected}")
+        # click.confirm(f"Did you mean {corrected} rather than {username}?")
 
     return corrected
 
@@ -62,6 +64,7 @@ def send_messages(forum, pending_matchups, template):
     tournaments = db["tournaments"]
     templates = db["templates"]
 
+    sent = defaultdict(int)
     for (
         tournament_id,
         tournament_name,
@@ -144,9 +147,10 @@ def send_messages(forum, pending_matchups, template):
 
         send = "Resend" if already_sent else "Send"
         recipients = [player1_name, player2_name] + ccs
-        should_send = click.confirm(
-            f"To: {', '.join(recipients)}\n======\n{title}\n======\n{body}\n{send}?"
-        )
+        # should_send = click.confirm(
+        #     f"To: {', '.join(recipients)}\n======\n{title}\n======\n{body}\n{send}?"
+        # )
+        should_send = True
 
         if should_send:
             while True:
@@ -164,6 +168,7 @@ def send_messages(forum, pending_matchups, template):
                             "sent": True,
                         }
                     )
+                    sent[tournament_name] += 1
                     break
                 except:
                     logger.exception(
@@ -183,6 +188,9 @@ def send_messages(forum, pending_matchups, template):
                         "sent": True,
                     }
                 )
+
+    for name, count in sent.items():
+        notify(f"Sent {count} scheduling thread(s) in {name}")
 
 
 def get_tournament_metadata(name, **keys):
@@ -253,8 +261,11 @@ def match_is_pending(match):
 @click.pass_context
 @click_log.simple_verbosity_option(logger)
 def autoto(ctx, forum_username, forum_password):
+    setup_notifications()
     ctx.obj = {
-        "forum": Forum("http://forums.sirlingames.com", forum_username, forum_password)
+        "forum": Forum(
+            db, "http://forums.sirlingames.com", forum_username, forum_password
+        )
     }
     if os.path.exists("autoto.db"):
         shutil.copyfile("autoto.db", "autoto.db.bak")
@@ -284,7 +295,11 @@ def prompt_expiring_matches(ctx, domains):
         tournament.data["id"]: tournament for tournament in all_tournaments(domains)
     }
     pending_matches = {
-        (match.player1.data["display_name"], match.player2.data["display_name"], match.data["round"])
+        (
+            match.player1.data["display_name"],
+            match.player2.data["display_name"],
+            match.data["round"],
+        )
         for tournament in tournaments.values()
         for match in tournament.pending_matches
     }
@@ -305,25 +320,20 @@ def prompt_expiring_matches(ctx, domains):
         later=date.today() + timedelta(days=3),
     )
 
-    print(
-        tabulate(
-            (
-                {
-                    "Tournament": tournaments[result["tournament"]].data["name"],
-                    "Player 1": result["player1"],
-                    "Player 2": result["player2"],
-                    "Round": result["round"],
-                    "Due Date": result["due_date"],
-                    "Thread": "http://forums.sirlingames.com/t/{}".format(
-                        result["thread_id"]
-                    ),
-                }
-                for result in results
-                if (result['player1'], result['player2'], result['round']) in pending_matches
-            ),
-            {},
-        )
-    )
+    soon_to_expire = [
+        {
+            "Tournament": tournaments[result["tournament"]].data["name"],
+            "Player 1": result["player1"],
+            "Player 2": result["player2"],
+            "Round": result["round"],
+            "Due Date": result["due_date"],
+            "Thread": "http://forums.sirlingames.com/t/{}".format(result["thread_id"]),
+        }
+        for result in results
+        if (result["player1"], result["player2"], result["round"]) in pending_matches
+    ]
+    if soon_to_expire:
+        notify("Soon to expire matches\n{}".format(tabulate(soon_to_expire, {})))
 
 
 @challonge.command("display-expired-matches")
@@ -334,7 +344,11 @@ def display_expired_matches(ctx, domains):
         tournament.data["id"]: tournament for tournament in all_tournaments(domains)
     }
     pending_matches = {
-        (match.player1.data["display_name"], match.player2.data["display_name"], match.data["round"])
+        (
+            match.player1.data["display_name"],
+            match.player2.data["display_name"],
+            match.data["round"],
+        )
         for tournament in tournaments.values()
         for match in tournament.pending_matches
     }
@@ -356,25 +370,20 @@ def display_expired_matches(ctx, domains):
         today=date.today(),
     )
     results = list(results)
-    print(
-        tabulate(
-            (
-                {
-                    "Tournament": tournaments[result["tournament"]].data["name"],
-                    "Player 1": result["player1"],
-                    "Player 2": result["player2"],
-                    "Round": result["round"],
-                    "Due Date": result["due_date"],
-                    "Thread": "http://forums.sirlingames.com/t/{}".format(
-                        result["thread_id"]
-                    ),
-                }
-                for result in results
-                if (result['player1'], result['player2'], result['round']) in pending_matches
-            ),
-            {},
-        )
-    )
+    expired = [
+        {
+            "Tournament": tournaments[result["tournament"]].data["name"],
+            "Player 1": result["player1"],
+            "Player 2": result["player2"],
+            "Round": result["round"],
+            "Due Date": result["due_date"],
+            "Thread": "http://forums.sirlingames.com/t/{}".format(result["thread_id"]),
+        }
+        for result in results
+        if (result["player1"], result["player2"], result["round"]) in pending_matches
+    ]
+    if expired:
+        notify("Expired matches\n{}".format(tabulate(expired, {})))
 
 
 @challonge.command("send-pending-matches")
@@ -1137,7 +1146,7 @@ def post_week_summary(ctx, ranked_id, week):
 def scheduled_times(posts):
     for post in posts:
         match = re.search(
-            "(?:<p>|<br>)\s*AutoTO: Schedule @ ([^<]*)(?:</p>)?",
+            "(?:>)\s*AutoTO: Schedule @ ([^<]*)(?:<)?",
             post["cooked"],
             flags=re.RegexFlag.IGNORECASE,
         )
@@ -1151,7 +1160,6 @@ def scheduled_times(posts):
 
 def prompt_event(title, string, date, url):
     while True:
-        print(date, repr(date.tzinfo))
         action = click.prompt(
             textwrap.dedent(
                 f"""\
@@ -1194,31 +1202,46 @@ def scheduled_at(ctx, context_message, matches):
     if matches:
         updated_at = matches[0]["post"]["updated_at"]
         scheduled_string = matches[0]["time"]
-        scheduled_date = None
+        if "MM/DD/YYYY HH:MM AM/PM TZ" in scheduled_string:
+            return
 
-        while scheduled_date is None:
-            try:
-                scheduled_date = dateparser.parse(scheduled_string)
-                if scheduled_date is None:
-                    logger.exception("Unable to parse datetime, please edit")
-                    scheduled_string = click.edit(scheduled_string, require_save=False)
-            except ValueError:
-                logger.exception("Unable to parse datetime, please edit")
-                scheduled_string = click.edit(scheduled_string, require_save=False)
+        try:
+            scheduled_date = dateparser.parse(scheduled_string)
+            if scheduled_date is None:
+                ctx.obj["forum"].reply_to(
+                    context_message["id"],
+                    "Unable to parse {!r}, please try again".format(scheduled_string),
+                )
+                logger.warning(
+                    "Unable to parse {!r} in {}".format(
+                        scheduled_string, context_message["title"]
+                    )
+                )
+                return
+        except ValueError:
+            ctx.obj["forum"].reply_to(
+                context_message["id"],
+                "Unable to parse {!r}, please try again".format(scheduled_string),
+            )
+            logger.warning(
+                "Unable to parse {!r} in {}".format(
+                    scheduled_string, context_message["title"]
+                )
+            )
+            return
+        logger.debug("Found date: %s", scheduled_date)
 
         current_event = scheduled_matches.find_one(message_id=context_message["id"])
+        logger.debug("Current event: %r", current_event)
         if current_event is None:
-            title, date = prompt_event(
-                context_message["title"],
-                scheduled_string,
-                scheduled_date,
-                ctx.obj["forum"].url(f"t/{context_message['id']}"),
+            logger.debug(
+                "Trying to schedule {!r} at {!r}".format(
+                    context_message["title"], scheduled_string
+                )
             )
-            if title == None:
-                return
-            scheduled_event = Calendar(
+            scheduled_event, link = Calendar(
                 "5qcrghv93ken5kco8e0eeqo3do@group.calendar.google.com"
-            ).insert_event(title, date)
+            ).insert_event(context_message["title"], scheduled_date)
             scheduled_matches.insert(
                 {
                     "message_id": context_message["id"],
@@ -1227,17 +1250,16 @@ def scheduled_at(ctx, context_message, matches):
                 }
             )
         elif current_event["updated_at"] < updated_at:
-            title, date = prompt_event(
-                context_message["title"],
-                scheduled_string,
-                scheduled_date,
-                ctx.obj["forum"].url(f"t/{context_message['id']}"),
+            logger.debug(
+                "Trying to reschedule {!r} at {!r}".format(
+                    context_message["title"], scheduled_string
+                )
             )
-            if title == None:
-                return
-            scheduled_event = Calendar(
+            scheduled_event, link = Calendar(
                 "5qcrghv93ken5kco8e0eeqo3do@group.calendar.google.com"
-            ).update_event(current_event["event_id"], title, date)
+            ).update_event(
+                current_event["event_id"], context_message["title"], scheduled_date
+            )
             scheduled_matches.update(
                 {
                     "message_id": context_message["id"],
@@ -1246,6 +1268,22 @@ def scheduled_at(ctx, context_message, matches):
                 },
                 keys=["message_id"],
             )
+        else:
+            logger.debug(
+                "Not updating existing event: %r was posted after %s",
+                current_event,
+                updated_at,
+            )
+            return
+
+        resp = ctx.obj["forum"].reply_to(
+            context_message["id"],
+            "Match scheduled at {date}. See the [calendar entry]({link}).".format(
+                date=scheduled_date, link=link
+            ),
+        )
+        logger.info("Scheduling reply response: %r", resp)
+        notify(f"{context_message['title']} scheduled at {scheduled_date}")
 
 
 @autoto_command(
@@ -1304,10 +1342,11 @@ def process_autoto(ctx, since):
     last_analyzed = most_recently_processed
 
     private = ctx.obj["forum"].private_messages()
-    private_archived = ctx.obj["forum"].private_messages(archived=True)
+    private_archived = ctx.obj["forum"].private_messages(suffix="archive")
+    private_sent = ctx.obj["forum"].private_messages(suffix="sent")
     public = ctx.obj["forum"].public_threads()
 
-    for message in merge_by_date(private, private_archived, public):
+    for message in merge_by_date(private, private_archived, private_sent, public):
         message_date = dateparser.parse(message["bumped_at"]).astimezone()
         logger.debug("Processing message %s from %s", message["id"], message_date)
         if message_date < most_recently_processed:
@@ -1332,7 +1371,7 @@ def process_autoto(ctx, since):
                 for (match, post) in (
                     (
                         re.search(
-                            fr'(?:<p>|<br>)\s*AutoTO: {command["command"]}(?:</p>)?',
+                            fr'(?:>)\s*AutoTO: {command["command"]}(?:<)?',
                             post["cooked"],
                             flags=re.RegexFlag.IGNORECASE,
                         ),
@@ -1383,9 +1422,7 @@ def daily(ctx, challonge_username, challonge_api_key, since, domains):
     ctx.invoke(send_pending_matches, domains=domains)
     logger.info("Parsing forum messages")
     ctx.invoke(process_autoto, since=since)
-    logger.info("Soon to expire matches")
     ctx.invoke(prompt_expiring_matches, domains=domains)
-    logger.info("Expired matches")
     ctx.invoke(display_expired_matches, domains=domains)
     # logger.info("Finalize ranked matches")
     # ctx.invoke(finalize_most_recent, ranked_id="ranked")

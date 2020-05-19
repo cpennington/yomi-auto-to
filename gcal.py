@@ -101,7 +101,7 @@ class Calendar:
             .insert(calendarId=self.calendar_id, body=self.event_body(title, date))
             .execute()
         )
-        return result["id"]
+        return result["id"], result["htmlLink"]
 
     def update_event(self, event_id, title, date):
         result = (
@@ -113,4 +113,4 @@ class Calendar:
             )
             .execute()
         )
-        return result["id"]
+        return result["id"], result["htmlLink"]

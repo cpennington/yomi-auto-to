@@ -19,7 +19,11 @@ class Tournament:
 
     @property
     def pending_matches(self):
-        if self.data["tournament_type"] in ("single elimination", "double elimination"):
+        if self.data["tournament_type"] in (
+            "single elimination",
+            "double elimination",
+            "swiss",
+        ):
             for match in self.matches:
                 if (
                     not match.data["completed_at"]
