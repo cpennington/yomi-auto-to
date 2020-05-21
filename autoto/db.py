@@ -24,23 +24,29 @@ VARIABLES = textwrap.dedent(
 
 TITLE_TEMPLATE = "${name} - R${round} - ${player1}/${player2}"
 
-BODY_TEMPLATE = textwrap.dedent(
-    """\
+BODY_TEMPLATE = textwrap.dedent("""\
     Hello, ${player1} and ${player2},
 
     You have until **${due.strftime('%A, %B %d')}** @ 11:59pm GMT to complete your match.
 
-    If you are posting to the scheduling conversation first, provide a list of dates and times when you are available to play. If you are posting to the scheduling conversation second, pick a specific start time and date for your match from those provided by your opponent. If none work for you, propose specific alternatives.
+    If you are posting to the scheduling conversation first, provide a list of
+    dates and times when you are available to play. If you are posting to the
+    scheduling conversation second, pick a specific start time and date for your
+    match from those provided by your opponent. If none work for you, propose
+    specific alternatives.
 
-    Use WorldTimeBuddy.com to coordinate your match across different timezones. See [this post](http://forums.sirlingames.com/t/yomi-tournament-iyl-5/2639/84) for a guide.
+    Use the Discord Insert Date/Time feature (![image|68x45](upload://yGvbZSqI4EQfqonbqINkm33LdLS.png))
+    to add localized date and time ranges to coordenate your match across different timezones.
 
-    Reporting: Either the victor or the vanquished (or both) should post results in [this thread](${get_tournament_metadata('tournament-thread', tournament=name)}).
+    Once you have found a time to play, you can post `AutoTO: Schedule @ MM/DD/YYYY HH:MM AM/PM TZ`
+    for example, `AutoTO: Schedule @ 4/1/2018 10:30 AM EST`), or use `AutoTO: Schedule @` and
+    then the Insert Date/Time feature, and AutoTO will post it to the [Yomi Tournament Calendar](https://bit.ly/iyl-calendar).
 
-    Once you have found a time to play, you can post `AutoTO: Schedule @ MM/DD/YYYY HH:MM AM/PM TZ` (for example, `AutoTO: Schedule @ 4/1/2018 10:30 AM EST`), and AutoTO will post it to the [Yomi Tournament Calendar](https://bit.ly/iyl-calendar).
+    Reporting: Either the victor or the vanquished (or both) should post results in
+    [this thread](${get_tournament_metadata('tournament-thread', tournament=name)}).
 
     Best of luck!
-"""
-)
+""")
 
 
 def default_title(tournament_name):

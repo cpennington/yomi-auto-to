@@ -1194,7 +1194,7 @@ def autoto_command(command, private=None, public=None):
     return wrapper
 
 
-@autoto_command(r"Schedule @ (?P<time>[^<]*)", private=".*")
+@autoto_command(r"""Schedule @ (<span[^>]*>)?(?P<time>[^<]*)""", private=".*")
 def scheduled_at(ctx, context_message, matches):
     scheduled_matches = db["scheduled_matches"]
 
