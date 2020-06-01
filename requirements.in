@@ -2,10 +2,8 @@ attrs
 click_log
 dataset
 dateparser
-dbus-python
 google-api-python-client
 lazy
-notify2
 oauth2client
 pip-tools
 prompt_toolkit
