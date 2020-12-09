@@ -8,6 +8,7 @@ import re
 import shutil
 import sys
 import textwrap
+import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from enum import Enum
@@ -58,33 +59,21 @@ def correct_user(forum, username):
     return corrected
 
 
-def send_messages(forum, pending_matchups, template):
+def on_day(date, day):
+    return date + timedelta(days=(day - date.weekday()) % 7)
+
+
+def get_round(tournament_id, round_number, tournament=None):
     rounds = db["rounds"]
-    matches = db["matches"]
     tournaments = db["tournaments"]
     templates = db["templates"]
 
-    sent = defaultdict(int)
-    for (
-        tournament_id,
-        tournament_name,
-        match_id,
-        match_round,
-        player1,
-        player2,
-        ccs,
-    ) in pending_matchups:
-        recorded_match = matches.find_one(match=match_id)
-        already_sent = recorded_match is not None and recorded_match["sent"]
+    round = rounds.find_one(tournament=tournament_id, round=round_number)
 
-        if already_sent:
-            continue
-
-        round = rounds.find_one(tournament=tournament_id, round=match_round)
-
-        if round is None:
+    if round is None:
+        if tournament is None:
             prev_round = rounds.find_one(
-                tournament=tournament_id, round=match_round - 1
+                tournament=tournament_id, round=round_number - 1
             )
             tournament = tournaments.find_one(id=tournament_id) or templates.find_one(
                 tournament=tournament_id
@@ -96,23 +85,56 @@ def send_messages(forum, pending_matchups, template):
             due_date = None
             while due_date is None:
                 due_date = click.prompt(
-                    f"When is round {match_round} of {tournament['slug']} due?",
+                    f"When is round {round_number} of {tournament['slug']} due?",
                     type=dateparser.parse,
                     default=default,
                 )
-            round = {
-                "tournament": tournament_id,
-                "round": match_round,
-                "due_date": due_date,
-            }
-            rounds.insert(round)
+        else:
+            due_date = tournament.round_due_dates[round_number]
+
+        round = {
+            "tournament": tournament_id,
+            "round": round_number,
+            "due_date": due_date,
+        }
+        rounds.insert(round)
+
+    return round
+
+
+def send_messages(forum, pending_matchups, template):
+    matches = db["matches"]
+
+    sent = defaultdict(int)
+    for (
+        tournament_id,
+        tournament_name,
+        match_id,
+        match_round,
+        player1,
+        player2,
+        ccs,
+        tournament,
+    ) in pending_matchups:
+        recorded_match = matches.find_one(match=match_id)
+        already_sent = recorded_match is not None and recorded_match["sent"]
+
+        round = get_round(tournament_id, match_round, tournament)
+
+        if already_sent:
+            continue
 
         try:
             player1_name = correct_user(forum, player1)
+        except Exception:
+            logger.exception("Unable to locate user %r, skipping", player1)
+            player1_name = player1
+
+        try:
             player2_name = correct_user(forum, player2)
         except Exception:
-            logger.exception("Unable to locate user, skipping")
-            continue
+            logger.exception("Unable to locate user %r, skipping", player2)
+            player2_name = player2
 
         round_id = str(abs(match_round))
         if match_round < 0:
@@ -146,7 +168,7 @@ def send_messages(forum, pending_matchups, template):
         )
 
         send = "Resend" if already_sent else "Send"
-        recipients = [player1_name, player2_name] + ccs
+        recipients = set([player1_name, player2_name] + ccs)
         # should_send = click.confirm(
         #     f"To: {', '.join(recipients)}\n======\n{title}\n======\n{body}\n{send}?"
         # )
@@ -172,7 +194,7 @@ def send_messages(forum, pending_matchups, template):
                     break
                 except:
                     logger.exception(
-                        f"Unable to send matchup message. Response: {resp.json()}"
+                        f"Unable to send matchup message. Title: {title}, to: {recipients}. Response: {resp.json()}"
                     )
                     time.sleep(30)
         else:
@@ -226,6 +248,9 @@ def matches_in_tournament(tournament):
     participant_names = {
         participant.data["id"]: participant for participant in tournament.participants
     }
+    for participant in tournament.participants:
+        for group_id in participant.data.get("group_id_list"):
+            participant_names[group_id] = participant
 
     for match in tournament.matches:
         yield (
@@ -401,6 +426,7 @@ def send_pending_matches(ctx, domains):
                 match.player1.data["display_name"],
                 match.player2.data["display_name"],
                 tournament.co_tos,
+                tournament,
             )
             for match in tournament.pending_matches
         )
@@ -425,6 +451,7 @@ def send_round_matches(ctx, tournament_matcher, round, domains):
                     match.player1.data["display_name"],
                     match.player2.data["display_name"],
                     tournament.co_tos,
+                    tournament,
                 )
                 for match in tournament.matches_for_round(round)
                 if match.data["state"] != "complete"
@@ -440,7 +467,9 @@ def send_round_matches(ctx, tournament_matcher, round, domains):
 def challonge_add_to(ctx, tournament_matcher, to, domains):
     for tournament in all_tournaments(domains):
         if fnmatch(tournament.data["name"], tournament_matcher):
-            ctx.invoke(add_to, slug=tournament.slug, to=to)
+            ctx.invoke(
+                add_to, challonge_id=tournament.data["id"], slug=tournament.slug, to=to
+            )
 
 
 @autoto.group()
@@ -691,6 +720,7 @@ def send_ranked_matches(ctx, ranked_id, week):
                 player1["username"],
                 player2["username"],
                 [],
+                None,
             )
             for (player1, player2) in matches
         ),
@@ -717,6 +747,7 @@ def create_ranked_match(ctx, ranked_id, player1, player2, week):
                 player1,
                 player2,
                 [],
+                None,
             )
         ],
         template,
@@ -1412,6 +1443,8 @@ def edit_template(slug):
 @click.option("--domain", "domains", multiple=True)
 @click.pass_context
 def daily(ctx, challonge_username, challonge_api_key, since, domains):
+    ctx.obj["forum"].search_user("vengefulpickle")
+
     logger.info("Checking pending Challonge matches")
     ctx.invoke(
         challonge,
@@ -1438,7 +1471,6 @@ def add_to(slug, to):
         tournament["tos"] = ",".join(set(tournament["tos"].split(",")) | {to})
     else:
         tournament["tos"] = to
-    del tournament["id"]
 
     tournaments.upsert(tournament, keys=["slug"])
 

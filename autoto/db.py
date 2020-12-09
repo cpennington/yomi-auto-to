@@ -35,8 +35,8 @@ BODY_TEMPLATE = textwrap.dedent("""\
     match from those provided by your opponent. If none work for you, propose
     specific alternatives.
 
-    Use the Discord Insert Date/Time feature (![image|68x45](upload://yGvbZSqI4EQfqonbqINkm33LdLS.png))
-    to add localized date and time ranges to coordenate your match across different timezones.
+    Use the Forums Insert Date/Time feature (![image|68x45](upload://yGvbZSqI4EQfqonbqINkm33LdLS.png))
+    to add localized date and time ranges to coordinate your match across different timezones.
 
     Once you have found a time to play, you can post `AutoTO: Schedule @ MM/DD/YYYY HH:MM AM/PM TZ`
     for example, `AutoTO: Schedule @ 4/1/2018 10:30 AM EST`), or use `AutoTO: Schedule @` and

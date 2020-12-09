@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import requests
+import sys
 import time
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -189,14 +190,12 @@ class Forum:
 
     def search_user(self, name):
         self.login()
-
-        return self.session.get(
-            self.url("/u/search/users"),
-            data={
-                "term": name,
-                "include_groups": "false",
-                "include_mentionable_groups": "false",
-                "include_messageable_groups": "true",
-                "topic_allowed_users": "false",
-            },
-        )
+        data = {
+            "term": name,
+            "include_groups": "false",
+            "include_mentionable_groups": "false",
+            "include_messageable_groups": "true",
+            "topic_allowed_users": "false",
+        }
+        response = self.session.get(self.url("u/search/users"), params=data,)
+        return response
