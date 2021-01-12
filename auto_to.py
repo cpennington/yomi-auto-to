@@ -90,7 +90,10 @@ def get_round(tournament_id, round_number, tournament=None):
                     default=default,
                 )
         else:
-            due_date = tournament.round_due_dates[round_number]
+            due_date = max(
+                tournament.round_due_dates[round_number],
+                date.today() + timedelta(days=7)
+            )
 
         round = {
             "tournament": tournament_id,
@@ -232,7 +235,7 @@ def get_tournament_metadata(name, **keys):
     return row["value"]
 
 
-def all_tournaments(domains=None):
+def all_tournaments(domains=None, games=()):
     if domains is None:
         domains = ()
     domains += (None,)
@@ -240,7 +243,7 @@ def all_tournaments(domains=None):
     for domain in domains:
         tournaments = pychal.tournaments.index(subdomain=domain)
         for tournament in tournaments:
-            if not tournament["completed_at"]:
+            if not tournament["completed_at"] and tournament["game_name"] in games:
                 yield Tournament(tournament)
 
 
@@ -314,10 +317,12 @@ def challonge(challonge_username, challonge_api_key):
 
 @challonge.command("prompt-expiring-matches")
 @click.option("--domain", "domains", multiple=True)
+@click.option("--game", "games", multiple=True, default=["Yomi", "Puzzle Strike"])
 @click.pass_context
-def prompt_expiring_matches(ctx, domains):
+def prompt_expiring_matches(ctx, domains, games):
     tournaments = {
-        tournament.data["id"]: tournament for tournament in all_tournaments(domains)
+        tournament.data["id"]: tournament
+        for tournament in all_tournaments(domains, games)
     }
     pending_matches = {
         (
@@ -363,10 +368,11 @@ def prompt_expiring_matches(ctx, domains):
 
 @challonge.command("display-expired-matches")
 @click.option("--domain", "domains", multiple=True)
+@click.option("--game", "games", multiple=True, default=['Yomi', 'Puzzle Strike'])
 @click.pass_context
-def display_expired_matches(ctx, domains):
+def display_expired_matches(ctx, domains, games):
     tournaments = {
-        tournament.data["id"]: tournament for tournament in all_tournaments(domains)
+        tournament.data["id"]: tournament for tournament in all_tournaments(domains, games)
     }
     pending_matches = {
         (
@@ -413,9 +419,10 @@ def display_expired_matches(ctx, domains):
 
 @challonge.command("send-pending-matches")
 @click.option("--domain", "domains", multiple=True)
+@click.option("--game", "games", multiple=True, default=['Yomi', 'Puzzle Strike'])
 @click.pass_context
-def send_pending_matches(ctx, domains):
-    for tournament in all_tournaments(domains):
+def send_pending_matches(ctx, domains, games):
+    for tournament in all_tournaments(domains, games):
         template = tournament.template
         pending_matches = (
             (
@@ -437,9 +444,10 @@ def send_pending_matches(ctx, domains):
 @click.argument("tournament_matcher")
 @click.argument("round", type=int)
 @click.option("--domain", "domains", multiple=True)
+@click.option("--game", "games", multiple=True, default=['Yomi', 'Puzzle Strike'])
 @click.pass_context
-def send_round_matches(ctx, tournament_matcher, round, domains):
-    for tournament in all_tournaments(domains):
+def send_round_matches(ctx, tournament_matcher, round, domains, games):
+    for tournament in all_tournaments(domains, games):
         if fnmatch(tournament.data["name"], tournament_matcher):
             template = tournament.template
             pending_matches = (
@@ -463,9 +471,10 @@ def send_round_matches(ctx, tournament_matcher, round, domains):
 @click.argument("tournament_matcher")
 @click.argument("to")
 @click.option("--domain", "domains", multiple=True)
+@click.option("--game", "games", multiple=True, default=["Yomi", "Puzzle Strike"])
 @click.pass_context
-def challonge_add_to(ctx, tournament_matcher, to, domains):
-    for tournament in all_tournaments(domains):
+def challonge_add_to(ctx, tournament_matcher, to, domains, games):
+    for tournament in all_tournaments(domains, games):
         if fnmatch(tournament.data["name"], tournament_matcher):
             ctx.invoke(
                 add_to, challonge_id=tournament.data["id"], slug=tournament.slug, to=to
@@ -1451,12 +1460,13 @@ def daily(ctx, challonge_username, challonge_api_key, since, domains):
         challonge_username=challonge_username,
         challonge_api_key=challonge_api_key,
     )
-    logger.info("Sending pending matches")
-    ctx.invoke(send_pending_matches, domains=domains)
     logger.info("Parsing forum messages")
     ctx.invoke(process_autoto, since=since)
     ctx.invoke(prompt_expiring_matches, domains=domains)
     ctx.invoke(display_expired_matches, domains=domains)
+
+    logger.info("Sending pending matches")
+    ctx.invoke(send_pending_matches, domains=domains)
     # logger.info("Finalize ranked matches")
     # ctx.invoke(finalize_most_recent, ranked_id="ranked")
 
