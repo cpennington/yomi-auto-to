@@ -90,10 +90,7 @@ def get_round(tournament_id, round_number, tournament=None):
                     default=default,
                 )
         else:
-            due_date = max(
-                tournament.round_due_dates[round_number],
-                date.today() + timedelta(days=7)
-            )
+            due_date = tournament.round_due_dates[round_number]
 
         round = {
             "tournament": tournament_id,
@@ -122,10 +119,14 @@ def send_messages(forum, pending_matchups, template):
         recorded_match = matches.find_one(match=match_id)
         already_sent = recorded_match is not None and recorded_match["sent"]
 
-        round = get_round(tournament_id, match_round, tournament)
-
         if already_sent:
             continue
+
+        round = get_round(tournament_id, match_round, tournament)
+        if round["due_date"] - date.today() < timedelta(days=7):
+            due_date_override = date.today() + timedelta(days=7)
+        else:
+            due_date_override = None
 
         try:
             player1_name = correct_user(forum, player1)
@@ -151,7 +152,7 @@ def send_messages(forum, pending_matchups, template):
                 round=round_id,
                 player1=player1_name,
                 player2=player2_name,
-                due=round["due_date"],
+                due=due_date_override or round["due_date"],
                 get_tournament_metadata=get_tournament_metadata,
             )
             .strip()
@@ -191,6 +192,7 @@ def send_messages(forum, pending_matchups, template):
                             "player2": player2_name,
                             "thread_id": resp.json()["post"]["topic_id"],
                             "sent": True,
+                            "due_date_override": due_date_override,
                         }
                     )
                     sent[tournament_name] += 1
@@ -211,6 +213,7 @@ def send_messages(forum, pending_matchups, template):
                         "player1": player1_name,
                         "player2": player2_name,
                         "sent": True,
+                        "due_date_override": due_date_override,
                     }
                 )
 
@@ -341,7 +344,7 @@ def prompt_expiring_matches(ctx, domains, games):
             ON matches.tournament = rounds.tournament
             AND matches.round = CASE WHEN rounds.round > 0 THEN rounds.round ELSE (-rounds.round || 'L') END
             WHERE winner IS NULL
-            AND rounds.due_date BETWEEN :today AND :later
+            AND COALESCE(matches.due_date_override, rounds.due_date) BETWEEN :today AND :later
             AND rounds.tournament IN ({tournaments})
         """.format(
             tournaments=",".join(repr(id) for id in tournaments.keys())
@@ -368,11 +371,12 @@ def prompt_expiring_matches(ctx, domains, games):
 
 @challonge.command("display-expired-matches")
 @click.option("--domain", "domains", multiple=True)
-@click.option("--game", "games", multiple=True, default=['Yomi', 'Puzzle Strike'])
+@click.option("--game", "games", multiple=True, default=["Yomi", "Puzzle Strike"])
 @click.pass_context
 def display_expired_matches(ctx, domains, games):
     tournaments = {
-        tournament.data["id"]: tournament for tournament in all_tournaments(domains, games)
+        tournament.data["id"]: tournament
+        for tournament in all_tournaments(domains, games)
     }
     pending_matches = {
         (
@@ -393,7 +397,7 @@ def display_expired_matches(ctx, domains, games):
             WHERE winner IS NULL
             AND player1 IS NOT NULL
             AND player2 IS NOT NULL
-            AND due_date < :today
+            AND COALESCE(matches.due_date_override, rounds.due_date) < :today
             AND rounds.tournament IN ({tournaments})
         """.format(
             tournaments=",".join(repr(id) for id in tournaments.keys())
@@ -419,7 +423,7 @@ def display_expired_matches(ctx, domains, games):
 
 @challonge.command("send-pending-matches")
 @click.option("--domain", "domains", multiple=True)
-@click.option("--game", "games", multiple=True, default=['Yomi', 'Puzzle Strike'])
+@click.option("--game", "games", multiple=True, default=["Yomi", "Puzzle Strike"])
 @click.pass_context
 def send_pending_matches(ctx, domains, games):
     for tournament in all_tournaments(domains, games):
@@ -444,7 +448,7 @@ def send_pending_matches(ctx, domains, games):
 @click.argument("tournament_matcher")
 @click.argument("round", type=int)
 @click.option("--domain", "domains", multiple=True)
-@click.option("--game", "games", multiple=True, default=['Yomi', 'Puzzle Strike'])
+@click.option("--game", "games", multiple=True, default=["Yomi", "Puzzle Strike"])
 @click.pass_context
 def send_round_matches(ctx, tournament_matcher, round, domains, games):
     for tournament in all_tournaments(domains, games):
