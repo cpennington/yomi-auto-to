@@ -5,9 +5,12 @@ dateparser
 google-api-python-client
 lazy
 oauth2client
-pip-tools
+pip-tools >= 5.5
 prompt_toolkit
 pychal
 requests
 tabulate
 wrapt
+typing-copilot
+black
+pyupgrade

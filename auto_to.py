@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta
 from enum import Enum
 from fnmatch import fnmatch
 from random import Random
+from typing import Mapping
 
 import challonge as pychal
 import click
@@ -81,7 +82,7 @@ def get_round(tournament_id, round_number, tournament=None):
             if prev_round:
                 default = prev_round["due_date"] + timedelta(days=7)
             else:
-                default = date.today() + timedelta(days=7)
+                default = datetime.utcnow() + timedelta(days=7)
             due_date = None
             while due_date is None:
                 due_date = click.prompt(
@@ -105,7 +106,7 @@ def get_round(tournament_id, round_number, tournament=None):
 def send_messages(forum, pending_matchups, template):
     matches = db["matches"]
 
-    sent = defaultdict(int)
+    sent: Mapping[str, int] = defaultdict(int)
     for (
         tournament_id,
         tournament_name,
@@ -123,8 +124,8 @@ def send_messages(forum, pending_matchups, template):
             continue
 
         round = get_round(tournament_id, match_round, tournament)
-        if round["due_date"] - date.today() < timedelta(days=7):
-            due_date_override = date.today() + timedelta(days=7)
+        if round["due_date"] - datetime.now() < timedelta(days=7):
+            due_date_override = datetime.now() + timedelta(days=7)
         else:
             due_date_override = None
 
@@ -165,7 +166,7 @@ def send_messages(forum, pending_matchups, template):
                 round=round_id,
                 player1=player1_name,
                 player2=player2_name,
-                due=round["due_date"],
+                due=due_date_override or round["due_date"],
                 get_tournament_metadata=get_tournament_metadata,
             )
             .strip()
@@ -349,8 +350,8 @@ def prompt_expiring_matches(ctx, domains, games):
         """.format(
             tournaments=",".join(repr(id) for id in tournaments.keys())
         ),
-        today=date.today(),
-        later=date.today() + timedelta(days=3),
+        today=datetime.utcnow(),
+        later=datetime.utcnow() + timedelta(days=3),
     )
 
     soon_to_expire = [
@@ -402,7 +403,7 @@ def display_expired_matches(ctx, domains, games):
         """.format(
             tournaments=",".join(repr(id) for id in tournaments.keys())
         ),
-        today=date.today(),
+        today=datetime.utcnow(),
     )
     results = list(results)
     expired = [
@@ -775,7 +776,7 @@ class Box:
 
     @property
     def width(self):
-        return max((len(row) for row in self.data))
+        return max(len(row) for row in self.data)
 
     @property
     def height(self):
@@ -1159,9 +1160,7 @@ def post_week_summary(ctx, ranked_id, week):
                 post.append(
                     "| {username} | {stars} |".format(
                         username=player["username"],
-                        stars=":star:"
-                        * ((player["stars"] or 0) - league.value * STARS_PER_LEVEL),
-                        inactive=":knockdown:" if not player["active"] else ":psfist:",
+                        stars=":star:" * ((player["stars"] or 0) - league.value * STARS_PER_LEVEL),
                     )
                 )
 
@@ -1190,7 +1189,7 @@ def post_week_summary(ctx, ranked_id, week):
 def scheduled_times(posts):
     for post in posts:
         match = re.search(
-            "(?:>)\s*AutoTO: Schedule @ ([^<]*)(?:<)?",
+            r"(?:>)\s*AutoTO: Schedule @ ([^<]*)(?:<)?",
             post["cooked"],
             flags=re.RegexFlag.IGNORECASE,
         )
@@ -1254,7 +1253,7 @@ def scheduled_at(ctx, context_message, matches):
             if scheduled_date is None:
                 ctx.obj["forum"].reply_to(
                     context_message["id"],
-                    "Unable to parse {!r}, please try again".format(scheduled_string),
+                    f"Unable to parse {scheduled_string!r}, please try again",
                 )
                 logger.warning(
                     "Unable to parse {!r} in {}".format(
@@ -1265,7 +1264,7 @@ def scheduled_at(ctx, context_message, matches):
         except ValueError:
             ctx.obj["forum"].reply_to(
                 context_message["id"],
-                "Unable to parse {!r}, please try again".format(scheduled_string),
+                f"Unable to parse {scheduled_string!r}, please try again",
             )
             logger.warning(
                 "Unable to parse {!r} in {}".format(
@@ -1368,8 +1367,16 @@ def merge_by_date(*message_iters):
             pass
 
 
+def parse_date_with_timezone(v):
+    date = dateparser.parse(v)
+    if date:
+        return date.astimezone()
+    else:
+        return date
+
+
 @autoto.command()
-@click.option("--since", type=lambda v: dateparser.parse(v).astimezone(), default=None)
+@click.option("--since", type=parse_date_with_timezone, default=None)
 @click.pass_context
 def process_autoto(ctx, since):
     dates = db["dates"]
@@ -1452,7 +1459,7 @@ def edit_template(slug):
     prompt="Challonge API Key",
     envvar="AUTOTO_CHALLONGE_API_KEY",
 )
-@click.option("--since", type=lambda v: dateparser.parse(v).astimezone(), default=None)
+@click.option("--since", type=parse_date_with_timezone, default=None)
 @click.option("--domain", "domains", multiple=True)
 @click.pass_context
 def daily(ctx, challonge_username, challonge_api_key, since, domains):

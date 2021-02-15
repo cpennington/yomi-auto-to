@@ -1,6 +1,7 @@
 import httplib2
 import os
 from collections import namedtuple
+from typing import Mapping
 
 from apiclient import discovery
 from oauth2client import client
@@ -29,7 +30,7 @@ APPLICATION_NAME = "AutoTO"
 
 
 class MemoryCache:
-    _CACHE = {}
+    _CACHE: Mapping[str, str] = {}
 
     def get(self, url):
         return MemoryCache._CACHE.get(url)

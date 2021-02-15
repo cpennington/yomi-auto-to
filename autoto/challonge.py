@@ -1,16 +1,15 @@
 import attr
-from datetime import datetime
+import datetime
 import challonge as pychal
 import click
 from lazy import lazy
 import textwrap
 from .db import get_template, tournaments
 from collections import defaultdict
-from datetime import timedelta
 
 
 def on_day(date, day):
-    return date + timedelta(days=(day - date.weekday()) % 7)
+    return date + datetime.timedelta(days=(day - date.weekday()) % 7)
 
 
 @attr.s
@@ -105,7 +104,11 @@ class Tournament:
 
     @lazy
     def round_due_dates(self):
-        first_round_due = on_day(self.data["start_at"].date() + timedelta(days=1), 6)
+        first_round_due = on_day(
+            datetime.datetime.combine(self.data["start_at"].date(), datetime.time())
+            + datetime.timedelta(days=1),
+            6,
+        )
         dates = {
             round: first_round_due
             for round in self.rounds
@@ -124,7 +127,7 @@ class Tournament:
                 dates[next_to_process] = max(
                     dates[prev_round]
                     for prev_round in self.preceding_rounds[next_to_process]
-                ) + timedelta(days=7)
+                ) + datetime.timedelta(days=7)
 
                 for round in dates:
                     rounds_to_process.extend(
@@ -140,7 +143,7 @@ class Tournament:
             if self.following_rounds[round]:
                 dates[round] = min(
                     dates[next_round] for next_round in self.following_rounds[round]
-                ) - timedelta(days=7)
+                ) - datetime.timedelta(days=7)
 
         return dates
 
@@ -191,7 +194,10 @@ class Match:
 
     @property
     def expired(self):
-        return datetime.utcnow().date() > self.tournament.round_due_dates[self.round]
+        return (
+            datetime.datetime.utcnow()
+            > self.tournament.round_due_dates[self.round]
+        )
 
     @property
     def round(self):
