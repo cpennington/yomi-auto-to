@@ -1,4 +1,5 @@
 #! /usr/bin/env python3
+from __future__ import annotations
 
 import itertools
 import json
@@ -14,7 +15,7 @@ from datetime import date, datetime, timedelta
 from enum import Enum
 from fnmatch import fnmatch
 from random import Random
-from typing import Mapping
+from typing import MutableMapping, Optional, Sequence, TypedDict
 
 import challonge as pychal
 import click
@@ -106,7 +107,7 @@ def get_round(tournament_id, round_number, tournament=None):
 def send_messages(forum, pending_matchups, template):
     matches = db["matches"]
 
-    sent: Mapping[str, int] = defaultdict(int)
+    sent: MutableMapping[str, int] = defaultdict(int)
     for (
         tournament_id,
         tournament_name,
@@ -123,6 +124,7 @@ def send_messages(forum, pending_matchups, template):
         if already_sent:
             continue
 
+        due_date_override: Optional[datetime]
         round = get_round(tournament_id, match_round, tournament)
         if round["due_date"] - datetime.now() < timedelta(days=7):
             due_date_override = datetime.now() + timedelta(days=7)
@@ -627,7 +629,7 @@ class League(Enum):
 
     @classmethod
     def from_stars(cls, stars):
-        return cls(min(stars // STARS_PER_LEVEL, max(cls).value))
+        return cls(min(stars // STARS_PER_LEVEL, max(*cls).value))
 
     def display_name(self):
         return {"SuperBronze": "Super Bronze", "SuperSilver": "Super Silver"}.get(
@@ -709,7 +711,7 @@ def send_ranked_matches(ctx, ranked_id, week):
     )
 
     already_scheduled_matches = matches.find(round=week, tournament=ranked_id)
-    already_scheduled_players = sum(
+    already_scheduled_players: Sequence = sum(
         [[match["player1"], match["player2"]] for match in already_scheduled_matches],
         [],
     )
@@ -816,7 +818,7 @@ class Box:
         return "\n".join(row.rstrip() for row in self.data)
 
 
-class SingletonBracket:
+class SingletonBracket(Bracket):
     def __init__(self, name):
         self.name = name
 
@@ -1356,7 +1358,7 @@ def merge_by_date(*message_iters):
 
     while nexts:
         next_message = max(
-            nexts, key=lambda next: dateparser.parse(next[0]["bumped_at"])
+            nexts, key=lambda next: dateparser.parse(next[0]["bumped_at"]) or datetime.min
         )
         message, message_iter = next_message
         nexts.remove(next_message)
@@ -1398,7 +1400,9 @@ def process_autoto(ctx, since):
     public = ctx.obj["forum"].public_threads()
 
     for message in merge_by_date(private, private_archived, private_sent, public):
-        message_date = dateparser.parse(message["bumped_at"]).astimezone()
+        message_date = dateparser.parse(message["bumped_at"])
+        if message_date:
+            message_date = message_date.astimezone()
         logger.debug("Processing message %s from %s", message["id"], message_date)
         if message_date < most_recently_processed:
             logger.debug(

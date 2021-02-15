@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import httplib2
 import os
 from collections import namedtuple
