@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import itertools
-import json
 import logging
 import os.path
 import re
@@ -14,6 +13,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from enum import Enum
 from fnmatch import fnmatch
+from functools import partial
 from random import Random
 from typing import (
     MutableMapping,
@@ -32,11 +32,12 @@ import click_log
 import dataset
 import dateparser
 import pytz
+from sqlalchemy.sql.elements import not_
 from tabulate import tabulate
 from mako.template import Template
 from prompt_toolkit import prompt
 
-from autoto.challonge import Tournament
+from autoto.challonge import Tournament, Match, TournamentData
 from autoto.db import get_template, templates, tournaments
 from forum import Forum
 from gcal import Calendar
@@ -78,8 +79,65 @@ class Round(TypedDict):
     due_date: datetime
 
 
+def message_admin(forum: Forum, message: str) -> None:
+    metadata = db["metadata"]
+    admin_thread = metadata.find_one(name="admin-thread")
+
+    if admin_thread:
+        logging.info("Messaging TOs in thread %d: %s", admin_thread["value"], message)
+        forum.reply_to(admin_thread["value"], message)
+    else:
+        resp = forum.send_private_message(
+            [forum.username], f"Admin Thread for AutoTO", message
+        )
+        resp.raise_for_status()
+        metadata.insert(
+            {"name": "admin-thread", "value": resp.json()["post"]["topic_id"]}
+        )
+        logging.info(
+            "Messaging Admin in new thread %d: %s",
+            resp.json()["post"]["topic_id"],
+            message,
+        )
+
+
+def message_TOs(forum: Forum, tournament: Tournament, message: str) -> None:
+    tournaments = db["tournaments"]
+    local_tournament = tournaments.find_one(challonge_id=tournament.data["id"])
+    if not (local_tournament):
+        local_tournament = tournaments.find_one(slug=tournament.slug)
+
+    if not (local_tournament):
+        local_tournament = {
+            "challonge_id": tournament.data["id"],
+            "slug": tournament.slug,
+        }
+        local_tournament["id"] = tournaments.insert(local_tournament)
+
+    if local_tournament["admin_thread"]:
+        logging.info(
+            "Messaging TOs in thread %d: %s", local_tournament["admin_thread"], message
+        )
+        forum.reply_to(local_tournament["admin_thread"], message)
+    else:
+        name = tournament.data["name"]
+        recipients = [forum.username, *local_tournament["co_tos"]]
+        resp = forum.send_private_message(
+            recipients, f"Admin Thread for {name} ({tournament.slug})", message
+        )
+        resp.raise_for_status()
+        local_tournament["admin_thread"] = resp.json()["post"]["topic_id"]
+        logging.info(
+            "Messaging TOs (%s) in new thread %d: %s",
+            ",".join(recipients),
+            local_tournament["admin_thread"],
+            message,
+        )
+        tournaments.update(local_tournament, keys=["id"])
+
+
 def get_round(
-    tournament_id: str, round_number: int, tournament: Optional[Tournament] = None
+    tournament_id: int, round_number: int, tournament: Optional[Tournament] = None
 ) -> Round:
     rounds = db["rounds"]
     tournaments = db["tournaments"]
@@ -128,7 +186,7 @@ def get_round(
 
 
 PendingMatchup = Tuple[
-    str, str, int, int, str, str, Sequence[str], Optional[Tournament]
+    int, str, int, int, str, str, Sequence[str], Optional[Tournament]
 ]
 
 
@@ -186,7 +244,9 @@ def send_messages(
                 player1=player1_name,
                 player2=player2_name,
                 due=due_date_override or round["due_date"],
-                get_tournament_metadata=get_tournament_metadata,
+                get_tournament_metadata=partial(
+                    get_tournament_metadata, forum, tournament
+                ),
             )
             .strip()
         )
@@ -199,7 +259,9 @@ def send_messages(
                 player1=player1_name,
                 player2=player2_name,
                 due=due_date_override or round["due_date"],
-                get_tournament_metadata=get_tournament_metadata,
+                get_tournament_metadata=partial(
+                    get_tournament_metadata, forum, tournament
+                ),
             )
             .strip()
         )
@@ -254,13 +316,19 @@ def send_messages(
         print(f"Sent {count} scheduling thread(s) in {name}")
 
 
-def get_tournament_metadata(name: str, **keys: Mapping) -> str:
+def get_tournament_metadata(
+    forum: Forum, tournament: Tournament, name: str, **keys: Mapping
+) -> str:
     metadata = db["metadata"]
     row = metadata.find_one(name=name, **keys)
     if not row:
+        formatted_keys = " ".join("{}={!r}".format(*item) for item in keys.items())
+        message_TOs(
+            forum, tournament, f"Missing metadata {name} for keys {formatted_keys}"
+        )
         value = prompt(
             "{keys} {name}=".format(
-                keys=" ".join("{}={!r}".format(*item) for item in keys.items()),
+                keys=formatted_keys,
                 name=name,
             )
         )
@@ -271,19 +339,25 @@ def get_tournament_metadata(name: str, **keys: Mapping) -> str:
     return row["value"]
 
 
-def all_tournaments(domains=None, games=()):
+def all_tournaments(
+    domains: Optional[Sequence[Optional[str]]] = None, games: Sequence[str] = ()
+) -> Iterable[Tournament]:
     if domains is None:
-        domains = ()
-    domains += (None,)
+        domains = []
+    domains = [None, *domains]
 
     for domain in domains:
-        tournaments = pychal.tournaments.index(subdomain=domain)
+        tournaments: Sequence[TournamentData] = pychal.tournaments.index(
+            subdomain=domain
+        )
         for tournament in tournaments:
             if not tournament["completed_at"] and tournament["game_name"] in games:
                 yield Tournament(tournament)
 
 
-def matches_in_tournament(tournament):
+def matches_in_tournament(
+    tournament: Tournament,
+) -> Iterable[Tuple[Tournament, Match, Optional[str], Optional[str]]]:
     participant_names = {
         participant.data["id"]: participant for participant in tournament.participants
     }
@@ -355,6 +429,9 @@ def challonge(challonge_username, challonge_api_key):
 @click.option("--game", "games", multiple=True, default=["Yomi", "Puzzle Strike"])
 @click.pass_context
 def prompt_expiring_matches(ctx, domains, games):
+    forum = ctx.obj["forum"]
+    matches = db["matches"]
+
     tournaments = {
         tournament.data["id"]: tournament
         for tournament in all_tournaments(domains, games)
@@ -368,9 +445,11 @@ def prompt_expiring_matches(ctx, domains, games):
         for tournament in tournaments.values()
         for match in tournament.pending_matches
     }
-    results = db.query(
+    nearly_expired = db.query(
         """
-            SELECT *
+            SELECT
+                matches.id as match_id,
+                *
             FROM matches
             JOIN rounds
             ON matches.tournament = rounds.tournament
@@ -387,18 +466,39 @@ def prompt_expiring_matches(ctx, domains, games):
 
     soon_to_expire = [
         {
-            "Tournament": tournaments[result["tournament"]].data["name"],
-            "Player 1": result["player1"],
-            "Player 2": result["player2"],
-            "Round": result["round"],
-            "Due Date": result["due_date"],
-            "Thread": "http://forums.sirlingames.com/t/{}".format(result["thread_id"]),
+            "Tournament": tournaments[match["tournament"]].data["name"],
+            "Player 1": match["player1"],
+            "Player 2": match["player2"],
+            "Round": match["round"],
+            "Due Date": match['due_date_override'] or match["due_date"],
+            "Thread": "http://forums.sirlingames.com/t/{}".format(match["thread_id"]),
+            "Last Messaged": dateparser.parse(match.get("last_messaged")),
+            "Match Id": match["match_id"],
         }
-        for result in results
-        if (result["player1"], result["player2"], result["round"]) in pending_matches
+        for match in nearly_expired
+        if (match["player1"], match["player2"], match["round"]) in pending_matches
     ]
     if soon_to_expire:
         print("Soon to expire matches\n{}".format(tabulate(soon_to_expire, {})))
+        not_recently_messaged = [
+            match
+            for match in soon_to_expire
+            if (not match["Last Messaged"])
+            or match["Last Messaged"] < datetime.utcnow() - timedelta(days=1)
+        ]
+        if not_recently_messaged:
+            message_admin(
+                forum, "Soon to expire matches: \n{}".format(tabulate(
+                    not_recently_messaged,
+                    headers="keys",
+                    tablefmt='pipe',
+                ))
+            )
+            for match in not_recently_messaged:
+                matches.update(
+                    {"id": match["Match Id"], "last_messaged": datetime.utcnow()},
+                    keys=["id"],
+                )
 
 
 @challonge.command("display-expired-matches")
@@ -406,6 +506,8 @@ def prompt_expiring_matches(ctx, domains, games):
 @click.option("--game", "games", multiple=True, default=["Yomi", "Puzzle Strike"])
 @click.pass_context
 def display_expired_matches(ctx, domains, games):
+    forum = ctx.obj['forum']
+    matches = db['matches']
     tournaments = {
         tournament.data["id"]: tournament
         for tournament in all_tournaments(domains, games)
@@ -419,9 +521,11 @@ def display_expired_matches(ctx, domains, games):
         for tournament in tournaments.values()
         for match in tournament.pending_matches
     }
-    results = db.query(
+    expired_matches = db.query(
         """
-            SELECT *
+            SELECT 
+                matches.id as match_id,
+                *
             FROM matches
             JOIN rounds
             ON matches.tournament = rounds.tournament
@@ -436,21 +540,43 @@ def display_expired_matches(ctx, domains, games):
         ),
         today=datetime.utcnow(),
     )
-    results = list(results)
+    expired_matches = list(expired_matches)
     expired = [
         {
-            "Tournament": tournaments[result["tournament"]].data["name"],
-            "Player 1": result["player1"],
-            "Player 2": result["player2"],
-            "Round": result["round"],
-            "Due Date": result["due_date"],
-            "Thread": "http://forums.sirlingames.com/t/{}".format(result["thread_id"]),
+            "Tournament": tournaments[match["tournament"]].data["name"],
+            "Player 1": match["player1"],
+            "Player 2": match["player2"],
+            "Round": match["round"],
+            "Due Date": match['due_date_override'] or match["due_date"],
+            "Thread": "http://forums.sirlingames.com/t/{}".format(match["thread_id"]),
+            "Last Messaged": dateparser.parse(match.get("last_messaged")),
+            "Match Id": match["match_id"],
         }
-        for result in results
-        if (result["player1"], result["player2"], result["round"]) in pending_matches
+        for match in expired_matches
+        if (match["player1"], match["player2"], match["round"]) in pending_matches
     ]
     if expired:
         print("Expired matches\n{}".format(tabulate(expired, {})))
+
+        not_recently_messaged = [
+            match
+            for match in expired
+            if (not match["Last Messaged"])
+            or match["Last Messaged"] < datetime.utcnow() - timedelta(days=1)
+        ]
+        if not_recently_messaged:
+            message_admin(
+                forum, "Expired matches: \n{}".format(tabulate(
+                    not_recently_messaged,
+                    headers="keys",
+                    tablefmt='pipe',
+                ))
+            )
+            for match in not_recently_messaged:
+                matches.update(
+                    {"id": match["Match Id"], "last_messaged": datetime.utcnow()},
+                    keys=["id"],
+                )
 
 
 @challonge.command("send-pending-matches")
@@ -1262,7 +1388,7 @@ def autoto_command(command, private=None, public=None):
 @autoto_command(r"""Schedule @ (<span[^>]*>)?(?P<time>[^<]*)""", private=".*")
 def scheduled_at(ctx, context_message, matches):
     scheduled_matches = db["scheduled_matches"]
-
+    forum = ctx.obj["forum"]
     matches = sorted(matches, key=lambda m: m["post"]["updated_at"], reverse=True)
     if matches:
         updated_at = matches[0]["post"]["updated_at"]
@@ -1273,7 +1399,7 @@ def scheduled_at(ctx, context_message, matches):
         try:
             scheduled_date = dateparser.parse(scheduled_string)
             if scheduled_date is None:
-                ctx.obj["forum"].reply_to(
+                forum.reply_to(
                     context_message["id"],
                     f"Unable to parse {scheduled_string!r}, please try again",
                 )
@@ -1284,7 +1410,7 @@ def scheduled_at(ctx, context_message, matches):
                 )
                 return
         except ValueError:
-            ctx.obj["forum"].reply_to(
+            forum.reply_to(
                 context_message["id"],
                 f"Unable to parse {scheduled_string!r}, please try again",
             )
@@ -1341,14 +1467,16 @@ def scheduled_at(ctx, context_message, matches):
             )
             return
 
-        resp = ctx.obj["forum"].reply_to(
+        resp = forum.reply_to(
             context_message["id"],
             "Match scheduled at {date}. See the [calendar entry]({link}).".format(
                 date=scheduled_date, link=link
             ),
         )
         logger.info("Scheduling reply response: %r", resp)
-        print(f"{context_message['title']} scheduled at {scheduled_date}")
+        message_admin(
+            forum, f"{context_message['title']} scheduled at {scheduled_date}"
+        )
 
 
 @autoto_command(

@@ -15,11 +15,19 @@ def on_day(date, day):
 
 class TournamentData(TypedDict):
     tournament_type: str
+    name: str
+    id: int
+    completed_at: datetime.datetime
+    game_name: str
 
 
 @attr.s
 class Tournament:
     data: TournamentData = attr.ib()
+
+    @classmethod
+    def load(id):
+        return Tournament(pychal.tournaments.show(id))
 
     @lazy
     def matches(self):
@@ -199,10 +207,7 @@ class Match:
 
     @property
     def expired(self):
-        return (
-            datetime.datetime.utcnow()
-            > self.tournament.round_due_dates[self.round]
-        )
+        return datetime.datetime.utcnow() > self.tournament.round_due_dates[self.round]
 
     @property
     def round(self):
