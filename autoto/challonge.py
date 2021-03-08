@@ -6,15 +6,20 @@ from lazy import lazy
 import textwrap
 from .db import get_template, tournaments
 from collections import defaultdict
+from typing import TypedDict
 
 
 def on_day(date, day):
     return date + datetime.timedelta(days=(day - date.weekday()) % 7)
 
 
+class TournamentData(TypedDict):
+    tournament_type: str
+
+
 @attr.s
 class Tournament:
-    data = attr.ib()
+    data: TournamentData = attr.ib()
 
     @lazy
     def matches(self):

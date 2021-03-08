@@ -15,7 +15,16 @@ from datetime import date, datetime, timedelta
 from enum import Enum
 from fnmatch import fnmatch
 from random import Random
-from typing import MutableMapping, Optional, Sequence, TypedDict
+from typing import (
+    MutableMapping,
+    Optional,
+    Sequence,
+    TypedDict,
+    Mapping,
+    Tuple,
+    Iterable,
+    Union,
+)
 
 import challonge as pychal
 import click
@@ -24,7 +33,6 @@ import dataset
 import dateparser
 import pytz
 from tabulate import tabulate
-from lazy import lazy
 from mako.template import Template
 from prompt_toolkit import prompt
 
@@ -32,7 +40,6 @@ from autoto.challonge import Tournament
 from autoto.db import get_template, templates, tournaments
 from forum import Forum
 from gcal import Calendar
-from notify import setup_notifications, notify
 
 logger = logging.getLogger(__name__)
 click_log.basic_config(logger)
@@ -40,7 +47,7 @@ click_log.basic_config(logger)
 db = dataset.connect("sqlite:///autoto.db")
 
 
-def correct_user(forum, username):
+def correct_user(forum: Forum, username: str) -> str:
     search_result = forum.search_user(username)
     search_result.raise_for_status()
     search_result = search_result.json()["users"]
@@ -55,17 +62,25 @@ def correct_user(forum, username):
         raise Exception(f"{username} not found")
     corrected = search_result[0]["username"]
     if corrected != username:
-        notify(f"Replaced {username} with {corrected}")
+        print(f"Replaced {username} with {corrected}")
         # click.confirm(f"Did you mean {corrected} rather than {username}?")
 
     return corrected
 
 
-def on_day(date, day):
+def on_day(date: date, day: int) -> date:
     return date + timedelta(days=(day - date.weekday()) % 7)
 
 
-def get_round(tournament_id, round_number, tournament=None):
+class Round(TypedDict):
+    tournament: str
+    round: int
+    due_date: datetime
+
+
+def get_round(
+    tournament_id: str, round_number: int, tournament: Optional[Tournament] = None
+) -> Round:
     rounds = db["rounds"]
     tournaments = db["tournaments"]
     templates = db["templates"]
@@ -77,9 +92,17 @@ def get_round(tournament_id, round_number, tournament=None):
             prev_round = rounds.find_one(
                 tournament=tournament_id, round=round_number - 1
             )
-            tournament = tournaments.find_one(id=tournament_id) or templates.find_one(
-                tournament=tournament_id
-            )
+            slug: str
+            tournament_dict: Optional[Mapping] = tournaments.find_one(id=tournament_id)
+            if tournament_dict is not None:
+                slug = tournament_dict["slug"]
+            else:
+                template = templates.find_one(tournament=tournament_id)
+                if template is not None:
+                    slug = template["slug"]
+            if not slug:
+                raise Exception(f"Unable to find a slug for {tournament_id}")
+
             if prev_round:
                 default = prev_round["due_date"] + timedelta(days=7)
             else:
@@ -87,7 +110,7 @@ def get_round(tournament_id, round_number, tournament=None):
             due_date = None
             while due_date is None:
                 due_date = click.prompt(
-                    f"When is round {round_number} of {tournament['slug']} due?",
+                    f"When is round {round_number} of {slug} due?",
                     type=dateparser.parse,
                     default=default,
                 )
@@ -104,7 +127,14 @@ def get_round(tournament_id, round_number, tournament=None):
     return round
 
 
-def send_messages(forum, pending_matchups, template):
+PendingMatchup = Tuple[
+    str, str, int, int, str, str, Sequence[str], Optional[Tournament]
+]
+
+
+def send_messages(
+    forum: Forum, pending_matchups: Iterable[PendingMatchup], template: Template
+) -> None:
     matches = db["matches"]
 
     sent: MutableMapping[str, int] = defaultdict(int)
@@ -175,7 +205,7 @@ def send_messages(forum, pending_matchups, template):
         )
 
         send = "Resend" if already_sent else "Send"
-        recipients = set([player1_name, player2_name] + ccs)
+        recipients = set([player1_name, player2_name, *ccs])
         # should_send = click.confirm(
         #     f"To: {', '.join(recipients)}\n======\n{title}\n======\n{body}\n{send}?"
         # )
@@ -221,10 +251,10 @@ def send_messages(forum, pending_matchups, template):
                 )
 
     for name, count in sent.items():
-        notify(f"Sent {count} scheduling thread(s) in {name}")
+        print(f"Sent {count} scheduling thread(s) in {name}")
 
 
-def get_tournament_metadata(name, **keys):
+def get_tournament_metadata(name: str, **keys: Mapping) -> str:
     metadata = db["metadata"]
     row = metadata.find_one(name=name, **keys)
     if not row:
@@ -295,7 +325,6 @@ def match_is_pending(match):
 @click.pass_context
 @click_log.simple_verbosity_option(logger)
 def autoto(ctx, forum_username, forum_password):
-    setup_notifications()
     ctx.obj = {
         "forum": Forum(
             db, "http://forums.sirlingames.com", forum_username, forum_password
@@ -369,7 +398,7 @@ def prompt_expiring_matches(ctx, domains, games):
         if (result["player1"], result["player2"], result["round"]) in pending_matches
     ]
     if soon_to_expire:
-        notify("Soon to expire matches\n{}".format(tabulate(soon_to_expire, {})))
+        print("Soon to expire matches\n{}".format(tabulate(soon_to_expire, {})))
 
 
 @challonge.command("display-expired-matches")
@@ -421,7 +450,7 @@ def display_expired_matches(ctx, domains, games):
         if (result["player1"], result["player2"], result["round"]) in pending_matches
     ]
     if expired:
-        notify("Expired matches\n{}".format(tabulate(expired, {})))
+        print("Expired matches\n{}".format(tabulate(expired, {})))
 
 
 @challonge.command("send-pending-matches")
@@ -489,7 +518,7 @@ def challonge_add_to(ctx, tournament_matcher, to, domains, games):
 
 
 @autoto.group()
-def ranked():
+def ranked() -> None:
     pass
 
 
@@ -631,7 +660,7 @@ class League(Enum):
     def from_stars(cls, stars):
         return cls(min(stars // STARS_PER_LEVEL, max(*cls).value))
 
-    def display_name(self):
+    def display_name(self) -> str:
         return {"SuperBronze": "Super Bronze", "SuperSilver": "Super Silver"}.get(
             self.name, self.name
         )
@@ -777,11 +806,11 @@ class Box:
         self.data = data
 
     @property
-    def width(self):
+    def width(self) -> int:
         return max(len(row) for row in self.data)
 
     @property
-    def height(self):
+    def height(self) -> int:
         return len(self.data)
 
     @classmethod
@@ -814,35 +843,17 @@ class Box:
             ]
         )
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "\n".join(row.rstrip() for row in self.data)
 
 
-class SingletonBracket(Bracket):
-    def __init__(self, name):
-        self.name = name
-
-    @property
-    def exit_row(self):
-        return 0
-
-    @property
-    def height(self):
-        return 1
-
-    @property
-    def names(self):
-        return [self.name]
-
-    def render(self, name_width):
-        return self.name
-
-    def __str__(self):
-        return self.name + " -"
-
-
 class Bracket:
-    def __init__(self, top, bottom, winner=None):
+    def __init__(
+        self,
+        top: Union[Bracket, str],
+        bottom: Union[Bracket, str],
+        winner: Optional[str] = None,
+    ):
         if isinstance(top, Bracket):
             self.top = top
         else:
@@ -878,15 +889,15 @@ class Bracket:
             self.center_h = "\N{BOX DRAWINGS HEAVY HORIZONTAL}"
 
     @property
-    def names(self):
-        return self.top.names + self.bottom.names
+    def names(self) -> Sequence[str]:
+        return [*self.top.names, *self.bottom.names]
 
     @property
-    def exit_row(self):
+    def exit_row(self) -> int:
         return self.top.height
 
     @property
-    def height(self):
+    def height(self) -> int:
         return self.top.height + self.bottom.height + 1
 
     def top_box(self, name_width):
@@ -935,8 +946,31 @@ class Bracket:
             ).left_of(bar)
         )
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.render(max(len(name) for name in self.names))
+
+
+class SingletonBracket(Bracket):
+    def __init__(self, name: str):
+        self.name = name
+
+    @property
+    def exit_row(self) -> int:
+        return 0
+
+    @property
+    def height(self) -> int:
+        return 1
+
+    @property
+    def names(self) -> Sequence[str]:
+        return [self.name]
+
+    def render(self, name_width: int) -> str:
+        return self.name
+
+    def __str__(self) -> str:
+        return self.name + " -"
 
 
 def bracket_history(match, ranked_id):
@@ -1162,7 +1196,8 @@ def post_week_summary(ctx, ranked_id, week):
                 post.append(
                     "| {username} | {stars} |".format(
                         username=player["username"],
-                        stars=":star:" * ((player["stars"] or 0) - league.value * STARS_PER_LEVEL),
+                        stars=":star:"
+                        * ((player["stars"] or 0) - league.value * STARS_PER_LEVEL),
                     )
                 )
 
@@ -1186,21 +1221,6 @@ def post_week_summary(ctx, ranked_id, week):
         post.append("[/details]")
 
     print("\n".join(post))
-
-
-def scheduled_times(posts):
-    for post in posts:
-        match = re.search(
-            r"(?:>)\s*AutoTO: Schedule @ ([^<]*)(?:<)?",
-            post["cooked"],
-            flags=re.RegexFlag.IGNORECASE,
-        )
-
-        if match is None:
-            continue
-
-        scheduled_time = match.group(1)
-        yield (post["updated_at"], scheduled_time, dateparser.parse(scheduled_time))
 
 
 def prompt_event(title, string, date, url):
@@ -1328,7 +1348,7 @@ def scheduled_at(ctx, context_message, matches):
             ),
         )
         logger.info("Scheduling reply response: %r", resp)
-        notify(f"{context_message['title']} scheduled at {scheduled_date}")
+        print(f"{context_message['title']} scheduled at {scheduled_date}")
 
 
 @autoto_command(
@@ -1358,7 +1378,8 @@ def merge_by_date(*message_iters):
 
     while nexts:
         next_message = max(
-            nexts, key=lambda next: dateparser.parse(next[0]["bumped_at"]) or datetime.min
+            nexts,
+            key=lambda next: dateparser.parse(next[0]["bumped_at"]) or datetime.min,
         )
         message, message_iter = next_message
         nexts.remove(next_message)
